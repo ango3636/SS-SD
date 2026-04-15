@@ -1,0 +1,9 @@
+paths:
+  data_root: /absolute/path/to/jigsaws_or_local_data
+  output_root: ./outputs
+
+detection:
+  yolo_weights: /absolute/path/to/custom_or_default_weights.pt
+
+kinematics:
+  sampling_hz: 30.0

@@ -1,0 +1,50 @@
+project:
+  name: suturing-stable-diffusion-pipeline
+  random_seed: 42
+
+paths:
+  data_root: ./data/raw
+  output_root: ./outputs
+  trial_index_csv: ./outputs/trial_index.csv
+  detection_metadata_csv: ./outputs/detection/detections.csv
+  kinematics_features_csv: ./outputs/kinematics/features.csv
+  synthesis_output_dir: ./outputs/synthesis
+
+ingestion:
+  video_extensions: [".avi", ".mp4", ".mov"]
+  kinematics_keywords: ["kinematics", "kinematic"]
+  transcription_keywords: ["transcription", "gesture", "transcript"]
+  frame_rate_hz: 30.0
+
+detection:
+  use_yolo: true
+  yolo_weights: yolov8n.pt
+  conf_threshold: 0.25
+  iou_threshold: 0.45
+  img_size: 640
+  min_box_area: 600
+  save_full_frame_if_detected: true
+  save_crops_if_detected: true
+  save_annotated_frames: true
+
+motion_fallback:
+  min_area: 1200
+  blur_kernel: 7
+  threshold_binary: 25
+
+sequence:
+  seq_len: 16
+  seq_stride: 8
+  img_size: 224
+  num_classes: 3
+  batch_size: 4
+
+kinematics:
+  translational_velocity_cols: [13, 14, 15]
+  rotational_velocity_cols: [16, 17, 18]
+  savgol_window: 11
+  savgol_polyorder: 3
+  sampling_hz: 30.0
+
+dashboard:
+  app_title: Suturing Comparison Dashboard

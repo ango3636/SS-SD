@@ -1,0 +1,37 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+.venv/
+venv/
+env/
+
+# Data and generated artifacts
+data/
+outputs/
+artifacts/
+models/
+checkpoints/
+runs/
+wandb/
+mlruns/
+*.pt
+*.pth
+*.onnx
+*.zip
+*.mp4
+*.avi
+*.mov
+*.csv
+*.parquet
+*.feather
+
+# Keep notebook history snapshots only
+!versions/
+!versions/*.ipynb
