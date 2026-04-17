@@ -24,6 +24,7 @@ def main() -> None:
         video_extensions=tuple(ingestion.get("video_extensions", [".avi", ".mp4", ".mov"])),
         kinematics_keywords=tuple(ingestion.get("kinematics_keywords", ["kinematics"])),
         transcription_keywords=tuple(ingestion.get("transcription_keywords", ["transcription"])),
+        ingestion_config=ingestion,
     )
     save_trial_index(df, cfg.paths["trial_index_csv"])
     print(f"Discovered {len(df)} trials.")

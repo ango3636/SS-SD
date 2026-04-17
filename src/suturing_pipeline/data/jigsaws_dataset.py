@@ -68,6 +68,54 @@ def _resolve_ci(path: Path) -> Path:
     return resolved
 
 
+def _pick_onetrialout_fold(
+    split_type_dir: Path,
+    itr: int,
+    split: str,
+) -> tuple[Path, Path]:
+    """Pick the first ``*_Out`` folder (name-sorted) that contains the split file.
+
+    Drive exports and partial zips often omit early folds or leave ``itr_1``
+    empty on some folds; the naive ``sorted(...)[0]`` choice then fails even
+    when a later fold has ``Train.txt`` / ``Test.txt``.
+    """
+    if not split_type_dir.is_dir():
+        raise FileNotFoundError(
+            f"Experimental-setup directory not found: {split_type_dir}"
+        )
+    outs = sorted(
+        (
+            p
+            for p in split_type_dir.iterdir()
+            if p.is_dir() and p.name.endswith("_Out")
+        ),
+        key=lambda p: p.name,
+    )
+    if not outs:
+        raise FileNotFoundError(
+            f"No *_Out folders found under {split_type_dir}"
+        )
+    for out_dir in outs:
+        split_path = _resolve_ci(out_dir / f"itr_{itr}" / f"{split}.txt")
+        if split_path.exists():
+            return out_dir, split_path
+
+    first = outs[0]
+    split_file = _resolve_ci(first / f"itr_{itr}" / f"{split}.txt")
+    avail_out = [p.name for p in outs]
+    itr_dir = _resolve_ci(first / f"itr_{itr}")
+    itr_hint = ""
+    if itr_dir.is_dir():
+        itr_hint = f" Example {itr_dir} contents: {sorted(p.name for p in itr_dir.iterdir())!r}."
+    raise FileNotFoundError(
+        f"No {split}.txt (case-insensitive) found under itr_{itr} in any *_Out folder "
+        f"under {split_type_dir}. Folds present: {avail_out[:30]}"
+        f"{'...' if len(avail_out) > 30 else ''}.{itr_hint}\n"
+        f"Re-sync the full Experimental_setup tree from JIGSAWS, or pass "
+        f"--held_out <N> for a fold that contains Train.txt."
+    )
+
+
 class JIGSAWSDataset(Dataset):
     """Frame-level dataset that yields ``(frame, kinematics, gesture_label)``
     triplets aligned by frame index.
@@ -140,19 +188,26 @@ class JIGSAWSDataset(Dataset):
         # JIGSAWS OneTrialOut has {N}_Out subfolders, not a single "one_out".
         if held_out is not None:
             out_dir = _resolve_ci(split_type_dir / f"{held_out}_Out")
-        else:
-            # Auto-pick the first available *_Out folder.
-            candidates = sorted(
-                (p for p in split_type_dir.iterdir() if p.is_dir()),
-                key=lambda p: p.name,
-            ) if split_type_dir.is_dir() else []
-            if not candidates:
+            split_file = _resolve_ci(out_dir / f"itr_{itr}" / f"{split}.txt")
+            if not split_file.exists():
+                itr_dir = _resolve_ci(out_dir / f"itr_{itr}")
+                itr_hint = ""
+                if itr_dir.is_dir():
+                    itr_hint = (
+                        f" Contents of {itr_dir}: "
+                        f"{sorted(p.name for p in itr_dir.iterdir())!r}."
+                    )
                 raise FileNotFoundError(
-                    f"No held-out folders found under {split_type_dir}"
+                    f"Split file not found: {split_file}\n"
+                    f"Expected JIGSAWS experimental-setup lists under "
+                    f"Experimental_setup/Suturing/<Balanced|unBalanced>/"
+                    f"GestureClassification/<split_type>/*_Out/itr_<n>/Train.txt "
+                    f"(filename case-insensitive).{itr_hint}\n"
+                    f"Try another fold, e.g. --held_out 10 --itr 1."
                 )
-            out_dir = candidates[0]
+        else:
+            out_dir, split_file = _pick_onetrialout_fold(split_type_dir, itr, split)
 
-        split_file = _resolve_ci(out_dir / f"itr_{itr}" / f"{split}.txt")
         task_dir = _resolve_ci(self.data_root / _TASK_NAME)
 
         # JIGSAWS metafiles are named "meta_file_{TaskName}.txt", not
