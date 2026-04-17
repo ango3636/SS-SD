@@ -36,11 +36,17 @@ def main() -> None:
 
     use_yolo = bool(cfg.detection.get("use_yolo", True))
     if use_yolo:
+        target_class_ids = cfg.detection.get("target_class_ids")
+        target_class_names = cfg.detection.get("target_class_names", [])
+        strict_target_class_names = bool(cfg.detection.get("strict_target_class_names", False))
         detector = YoloDetector(
             weights=cfg.detection.get("yolo_weights", "yolov8n.pt"),
             conf=float(cfg.detection.get("conf_threshold", 0.25)),
             iou=float(cfg.detection.get("iou_threshold", 0.45)),
             img_size=int(cfg.detection.get("img_size", 640)),
+            target_classes=list(target_class_ids) if target_class_ids else None,
+            target_class_names=list(target_class_names) if target_class_names else None,
+            strict_target_class_names=strict_target_class_names,
             min_box_area=int(cfg.detection.get("min_box_area", 0)),
         )
     else:

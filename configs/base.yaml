@@ -3,7 +3,7 @@ project:
   random_seed: 42
 
 paths:
-  data_root: ./data/raw
+  data_root: jigsaw
   output_root: ./outputs
   trial_index_csv: ./outputs/trial_index.csv
   detection_metadata_csv: ./outputs/detection/detections.csv
@@ -11,14 +11,27 @@ paths:
   synthesis_output_dir: ./outputs/synthesis
 
 ingestion:
+  source: gdrive
+  tasks: []
+  jigsaw_root_name: jigsaw
   video_extensions: [".avi", ".mp4", ".mov"]
   kinematics_keywords: ["kinematics", "kinematic"]
   transcription_keywords: ["transcription", "gesture", "transcript"]
   frame_rate_hz: 30.0
+  gdrive:
+    credentials_path: ./secrets/google_oauth_client.json
+    token_path: ./secrets/google_token.json
+    scopes: ["https://www.googleapis.com/auth/drive.readonly"]
+    oauth_flow: console
+    root_folder_id: "1Fk871tO8Wda02Xv5lXmmnaGQWEDl12RL"
+    materialize_local: true
+    cache_dir: ./data/gdrive_cache
 
 detection:
   use_yolo: true
   yolo_weights: yolov8n.pt
+  target_class_names: ["needle_head", "suture_needle", "needle"]
+  strict_target_class_names: true
   conf_threshold: 0.25
   iou_threshold: 0.45
   img_size: 640

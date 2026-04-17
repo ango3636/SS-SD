@@ -6,6 +6,17 @@ scipy
 pyyaml
 tqdm
 torch
+diffusers
+transformers
+accelerate
+peft
+safetensors
+scikit-learn
+Pillow
 streamlit
+imageio-ffmpeg
 ultralytics
 pytest
+google-api-python-client
+google-auth-httplib2
+google-auth-oauthlib

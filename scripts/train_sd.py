@@ -104,7 +104,17 @@ def _parse_args() -> argparse.Namespace:
 
 def _resolve_device(requested: str | None) -> torch.device:
     if requested:
-        return torch.device(requested)
+        dev = torch.device(requested)
+        if dev.type == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA was requested (--device cuda) but this PyTorch build has no CUDA. "
+                "In Colab: Runtime → Change runtime type → GPU, then Runtime → Restart session "
+                "and run all cells. If you already use a GPU runtime, reinstall CUDA PyTorch "
+                "before other packages, e.g.\n"
+                "  pip install torch torchvision --index-url "
+                "https://download.pytorch.org/whl/cu124"
+            )
+        return dev
     if torch.cuda.is_available():
         return torch.device("cuda")
     if torch.backends.mps.is_available():

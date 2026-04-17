@@ -1,37 +1,36 @@
-.DS_Store
 __pycache__/
-*.py[cod]
-*.so
-.Python
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+*.pyc
 .ipynb_checkpoints/
+.DS_Store
 
-.venv/
-venv/
-env/
+# Secrets
+secrets/
+.secrets/
+*oauth*client*.json
+*client_secret*.json
+*google_token*.json
 
-# Data and generated artifacts
-data/
-outputs/
-artifacts/
-models/
+# Training artifacts / data / runs (too large for git; use Drive or HF Hub)
 checkpoints/
-runs/
-wandb/
-mlruns/
+outputs/
+logs/
+data/gdrive_cache/
+data/
+pipeline_exploratory/
+
+# Model/binary artifacts
 *.pt
 *.pth
+*.ckpt
+*.safetensors
 *.onnx
-*.zip
+yolov8n.pt
+
+# Media artifacts
 *.mp4
 *.avi
 *.mov
-*.csv
-*.parquet
-*.feather
+*.mkv
 
-# Keep notebook history snapshots only
-!versions/
-!versions/*.ipynb
+# Editor / tool state
+.cursor/plans/
