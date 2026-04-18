@@ -975,7 +975,7 @@ def main() -> None:
                 "Playback FPS", 2.0, 15.0, 5.0, 0.5, key="fps_out"
             )
             num_inference_steps = st.slider(
-                "Diffusion steps", 10, 50, 20, 1,
+                "Diffusion steps", 10, 50, 25, 1,
                 help="More steps = sharper but slower.",
             )
             image_size = st.select_slider(
@@ -986,8 +986,10 @@ def main() -> None:
             anchor_mode = st.selectbox(
                 "Temporal anchor",
                 options=["none", "prev_gen", "flow_warp", "prev_real"],
-                index=1,
-                help="Init each frame's latent from a reference (reduces flicker).",
+                index=2,
+                help="Init each frame's latent from a reference (reduces flicker). "
+                "flow_warp uses dense optical flow between real frames to move "
+                "the previous generation into position before denoising.",
             )
             init_strength = st.slider(
                 "Init strength", 0.3, 1.0, 0.7, 0.05,
