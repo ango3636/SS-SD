@@ -1146,7 +1146,11 @@ def main() -> None:
             type="primary",
             use_container_width=True,
         )
-        output_placeholder = st.container()
+
+    # Render post-generation output (side-by-side video, metrics board,
+    # downloads) at the top level so it spans the full page width instead of
+    # being trapped inside `col_gen`'s half-width column.
+    output_placeholder = st.container()
 
     if go:
         fold_n, fold_msg = pick_fold_for_trial(trial["trial"])
