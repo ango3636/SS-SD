@@ -311,6 +311,7 @@ _PREVIEW_CACHE_VERSION = "v2-h264"
 def transcode_generated_to_h264(
     src_path_str: str,
     mtime_ns: int,
+    keep_audio: bool = False,
 ) -> Tuple[Optional[str], Optional[str]]:
     """Re-encode a generated MP4 (written by OpenCV with the ``mp4v``
     fourcc = MPEG-4 Part 2) into browser-friendly H.264 and cache it.
@@ -336,7 +337,7 @@ def transcode_generated_to_h264(
     PREVIEW_CACHE.mkdir(parents=True, exist_ok=True)
     key = (
         f"gen_{slugify(src_path.parent.name)}_{slugify(src_path.stem)}"
-        f"_{mtime_ns}_{_PREVIEW_CACHE_VERSION}.mp4"
+        f"_{mtime_ns}_{_PREVIEW_CACHE_VERSION}_{'audio' if keep_audio else 'mute'}.mp4"
     )
     out_path = PREVIEW_CACHE / key
     if out_path.exists() and out_path.stat().st_size > 1024:
@@ -345,14 +346,17 @@ def transcode_generated_to_h264(
     cmd = [
         ffmpeg, "-y", "-loglevel", "error",
         "-i", str(src_path),
-        "-an",
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
         "-preset", "veryfast",
         "-crf", "20",
         "-movflags", "+faststart",
-        str(out_path),
     ]
+    if not keep_audio:
+        cmd.append("-an")
+    else:
+        cmd.extend(["-c:a", "aac", "-b:a", "128k"])
+    cmd.append(str(out_path))
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, check=False
@@ -467,6 +471,10 @@ def run_generation(
     initial_spf_est: float,
     progress_bar,
     eta_text,
+    enable_narration: bool,
+    tts_provider: str,
+    tts_voice: str,
+    narrate_sidebyside: bool,
 ) -> Tuple[int, Path]:
     """Invoke ``scripts/generate_eval_video.py`` and stream its stdout into
     the given streamlit container, updating ``progress_bar`` / ``eta_text``
@@ -496,6 +504,18 @@ def run_generation(
     ]
     if held_out is not None:
         cmd.extend(["--held_out", str(held_out)])
+    if enable_narration:
+        cmd.extend(
+            [
+                "--enable_narration",
+                "--tts_provider",
+                tts_provider,
+                "--tts_voice",
+                tts_voice,
+            ]
+        )
+        if narrate_sidebyside:
+            cmd.append("--narrate_sidebyside")
 
     log_container.code(" ".join(cmd), language="bash")
     live = log_container.empty()
@@ -565,7 +585,9 @@ def render_video(path: Path, caption: str) -> None:
         return
     st.caption(caption)
     h264_path, err = transcode_generated_to_h264(
-        str(path), path.stat().st_mtime_ns
+        str(path),
+        path.stat().st_mtime_ns,
+        keep_audio=path.name.endswith("_narrated.mp4"),
     )
     if h264_path is None:
         st.warning(
@@ -601,13 +623,15 @@ def scan_existing_runs() -> List[Dict[str, object]]:
         if not run_dir.is_dir() or run_dir.name.startswith("_"):
             continue
         side = run_dir / "sidebyside.mp4"
+        side_narrated = run_dir / "sidebyside_narrated.mp4"
         gen = run_dir / "generated.mp4"
+        gen_narrated = run_dir / "generated_narrated.mp4"
         real = run_dir / "real.mp4"
         meta = run_dir / "metadata.json"
         # Playable = file exists and isn't the ~44-byte zero-frame husk.
         has_any = any(
             p.exists() and p.stat().st_size > 1024
-            for p in (side, gen, real)
+            for p in (side, side_narrated, gen, gen_narrated, real)
         )
         if not has_any:
             continue
@@ -617,7 +641,11 @@ def scan_existing_runs() -> List[Dict[str, object]]:
                 "dir": str(run_dir),
                 "mtime": run_dir.stat().st_mtime,
                 "has_side": side.exists() and side.stat().st_size > 1024,
+                "has_side_narrated": side_narrated.exists()
+                and side_narrated.stat().st_size > 1024,
                 "has_gen": gen.exists() and gen.stat().st_size > 1024,
+                "has_gen_narrated": gen_narrated.exists()
+                and gen_narrated.stat().st_size > 1024,
                 "has_real": real.exists() and real.stat().st_size > 1024,
                 "has_meta": meta.exists(),
             }
@@ -633,7 +661,9 @@ def render_previous_run(run_info: Dict[str, object], fps_hint: float) -> None:
     """
     run_dir = Path(str(run_info["dir"]))
     side_path = run_dir / "sidebyside.mp4"
+    side_narrated_path = run_dir / "sidebyside_narrated.mp4"
     gen_path = run_dir / "generated.mp4"
+    gen_narrated_path = run_dir / "generated_narrated.mp4"
     real_path = run_dir / "real.mp4"
     meta_path = run_dir / "metadata.json"
 
@@ -642,13 +672,24 @@ def render_previous_run(run_info: Dict[str, object], fps_hint: float) -> None:
         f"Last modified: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(float(run_info['mtime'])))}"
     )
 
-    render_video(side_path, "Side-by-side (REAL | GEN)")
+    selected_side = side_narrated_path if side_narrated_path.exists() else side_path
+    selected_gen = gen_narrated_path if gen_narrated_path.exists() else gen_path
+
+    render_video(
+        selected_side,
+        "Side-by-side (REAL | GEN + narration)"
+        if selected_side == side_narrated_path
+        else "Side-by-side (REAL | GEN)",
+    )
 
     sub_a, sub_b = st.columns(2)
     with sub_a:
         render_video(real_path, "Real (resampled)")
     with sub_b:
-        render_video(gen_path, "Generated")
+        render_video(
+            selected_gen,
+            "Generated + narration" if selected_gen == gen_narrated_path else "Generated",
+        )
 
     if real_path.exists() and gen_path.exists():
         try:
@@ -665,12 +706,12 @@ def render_previous_run(run_info: Dict[str, object], fps_hint: float) -> None:
             with st.expander("Run metadata", expanded=False):
                 st.json(meta)
 
-    if side_path.exists() and side_path.stat().st_size > 1024:
-        with open(side_path, "rb") as f:
+    if selected_side.exists() and selected_side.stat().st_size > 1024:
+        with open(selected_side, "rb") as f:
             st.download_button(
                 "Download side-by-side MP4",
                 data=f.read(),
-                file_name=f"{run_info['name']}_sidebyside.mp4",
+                file_name=f"{run_info['name']}_{selected_side.name}",
                 mime="video/mp4",
                 key=f"dl_side_prev_{run_info['name']}",
             )
@@ -995,6 +1036,27 @@ def main() -> None:
                 "Init strength", 0.3, 1.0, 0.7, 0.05,
                 help="1.0 = pure noise (no anchor). Lower = stronger temporal coherence.",
             )
+            enable_narration = st.checkbox(
+                "Enable narration audio",
+                value=False,
+                help="Generate gesture-aligned spoken commentary and mux into output MP4s.",
+            )
+            tts_provider = st.selectbox(
+                "Narration provider",
+                options=["gtts"],
+                index=0,
+                disabled=not enable_narration,
+            )
+            tts_voice = st.text_input(
+                "Narration language/voice",
+                value="en",
+                disabled=not enable_narration,
+            )
+            narrate_sidebyside = st.checkbox(
+                "Narrate side-by-side output",
+                value=True,
+                disabled=not enable_narration,
+            )
 
     existing_runs = scan_existing_runs()
     if existing_runs:
@@ -1193,6 +1255,10 @@ def main() -> None:
                 initial_spf_est=spf_est,
                 progress_bar=progress_bar,
                 eta_text=eta_text,
+                enable_narration=bool(enable_narration),
+                tts_provider=str(tts_provider),
+                tts_voice=str(tts_voice),
+                narrate_sidebyside=bool(narrate_sidebyside),
             )
         dt = time.time() - t0
         if rc != 0:
@@ -1206,17 +1272,33 @@ def main() -> None:
 
         with output_placeholder:
             side_path = out_dir / "sidebyside.mp4"
+            side_narrated_path = out_dir / "sidebyside_narrated.mp4"
             gen_path = out_dir / "generated.mp4"
+            gen_narrated_path = out_dir / "generated_narrated.mp4"
             real_path = out_dir / "real.mp4"
             meta_path = out_dir / "metadata.json"
 
-            render_video(side_path, "Side-by-side (REAL | GEN)")
+            selected_side = (
+                side_narrated_path if side_narrated_path.exists() else side_path
+            )
+            selected_gen = gen_narrated_path if gen_narrated_path.exists() else gen_path
+            render_video(
+                selected_side,
+                "Side-by-side (REAL | GEN + narration)"
+                if selected_side == side_narrated_path
+                else "Side-by-side (REAL | GEN)",
+            )
 
             sub_a, sub_b = st.columns(2)
             with sub_a:
                 render_video(real_path, "Real (resampled)")
             with sub_b:
-                render_video(gen_path, "Generated")
+                render_video(
+                    selected_gen,
+                    "Generated + narration"
+                    if selected_gen == gen_narrated_path
+                    else "Generated",
+                )
 
             if real_path.exists() and gen_path.exists():
                 render_metrics_board(real_path, gen_path, fps_hint=float(fps_out))
@@ -1230,11 +1312,11 @@ def main() -> None:
                     with st.expander("Run metadata", expanded=False):
                         st.json(meta)
 
-            with open(side_path, "rb") as f:
+            with open(selected_side, "rb") as f:
                 st.download_button(
                     "Download side-by-side MP4",
                     data=f.read(),
-                    file_name=f"{run_name}_sidebyside.mp4",
+                    file_name=f"{run_name}_{selected_side.name}",
                     mime="video/mp4",
                 )
 
