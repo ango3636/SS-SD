@@ -15,6 +15,7 @@ scikit-learn
 Pillow
 streamlit
 imageio-ffmpeg
+gTTS
 ultralytics
 pytest
 google-api-python-client

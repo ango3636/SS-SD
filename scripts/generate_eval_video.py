@@ -52,6 +52,12 @@ import torch
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
+from suturing_pipeline.audio.narration_templates import (
+    build_expert_speed_stats,
+    build_narration_payload,
+    collapse_frame_records,
+)
+from suturing_pipeline.audio.tts import mux_audio_to_video, synthesize_narration_audio
 from suturing_pipeline.data.jigsaws_dataset import JIGSAWSDataset
 from suturing_pipeline.synthesis.sd_sampler import SDSampler
 
@@ -161,6 +167,43 @@ def _parse_args() -> argparse.Namespace:
         "--no_sidebyside",
         action="store_true",
         help="Skip the stacked sidebyside.mp4 artefact.",
+    )
+    p.add_argument(
+        "--enable_narration",
+        action="store_true",
+        help="Generate a narration track and mux narrated MP4 artefacts.",
+    )
+    p.add_argument(
+        "--tts_provider",
+        default="gtts",
+        help="TTS backend (currently: gtts).",
+    )
+    p.add_argument(
+        "--tts_voice",
+        default="en",
+        help="Voice/language code for the TTS backend.",
+    )
+    p.add_argument(
+        "--narration_min_segment_sec",
+        type=float,
+        default=0.5,
+        help="Minimum narrated segment duration in seconds.",
+    )
+    p.add_argument(
+        "--narration_min_empirical_count",
+        type=int,
+        default=8,
+        help="Min expert segment count before using gesture-specific empirical speed thresholds.",
+    )
+    p.add_argument(
+        "--disable_empirical_speed_stats",
+        action="store_true",
+        help="Force absolute speed thresholds instead of expert-derived gesture stats.",
+    )
+    p.add_argument(
+        "--narrate_sidebyside",
+        action="store_true",
+        help="Also mux narration onto sidebyside.mp4 when it is produced.",
     )
 
     # Temporal anchoring (Tier-1 coherence controls).
@@ -298,6 +341,7 @@ def main() -> None:
         raise RuntimeError(
             "Checkpoint has no gesture_to_int mapping; cannot run eval."
         )
+    int_to_gesture = {v: k for k, v in ckpt_gesture_to_int.items()}
     default_gesture = min(ckpt_gesture_to_int.values())
 
     run_name = args.run_name or time.strftime("%Y%m%d_%H%M%S")
@@ -523,6 +567,95 @@ def main() -> None:
             "or an error during the first SD sample. Check the log above and re-run."
         )
 
+    narration_info: Dict[str, object] = {"enabled": bool(args.enable_narration)}
+    if args.enable_narration:
+        print("Building narration segments ...")
+        expert_stats: Dict[str, Dict[str, float]] = {}
+        if not args.disable_empirical_speed_stats:
+            try:
+                expert_stats = build_expert_speed_stats(args.data_root)
+                print(
+                    f"  expert speed stats loaded for {len(expert_stats)} gestures"
+                )
+            except Exception as e:  # pragma: no cover - defensive runtime path
+                print(f"  WARN: expert speed stats unavailable: {e}")
+                expert_stats = {}
+        collapsed = collapse_frame_records(
+            per_frame_records=per_frame_records,
+            int_to_gesture=int_to_gesture,
+            fps_out=args.fps_out,
+        )
+        narration_segments: List[Dict[str, object]] = []
+        for seg in collapsed:
+            src_frames = np.asarray(seg["source_frames"], dtype=np.int64)
+            kin_segment = dataset._kinematics[trial_idx][src_frames]
+            payload = build_narration_payload(
+                gesture_label=str(seg["gesture"]),
+                kinematic_segment=kin_segment,
+                expert_speed_stats=expert_stats,
+                min_count_for_empirical=args.narration_min_empirical_count,
+            )
+            narration_segments.append(
+                {
+                    "start_time": round(float(seg["start_time"]), 4),
+                    "end_time": round(float(seg["end_time"]), 4),
+                    "start_output_index": int(seg["start_output_index"]),
+                    "end_output_index": int(seg["end_output_index"]),
+                    "gesture": seg["gesture"],
+                    "gesture_int": int(seg["gesture_int"]),
+                    "source_frames": seg["source_frames"],
+                    "summary": payload["summary"],
+                    "narration_text": payload["narration_text"],
+                    "gesture_description": payload["gesture_description"],
+                }
+            )
+        segments_path = out_dir / "narration_segments.json"
+        segments_path.write_text(
+            json.dumps(narration_segments, indent=2), encoding="utf-8"
+        )
+        print(f"  wrote {segments_path}")
+
+        narration_info.update(
+            {
+                "segments_path": str(segments_path),
+                "segment_count": len(narration_segments),
+                "tts_provider": args.tts_provider,
+                "tts_voice": args.tts_voice,
+                "used_empirical_stats": not args.disable_empirical_speed_stats,
+            }
+        )
+        try:
+            audio_path = out_dir / "narration_track.m4a"
+            tts_info = synthesize_narration_audio(
+                segments=narration_segments,
+                output_audio_path=audio_path,
+                provider=args.tts_provider,
+                voice=args.tts_voice,
+                min_segment_seconds=args.narration_min_segment_sec,
+            )
+            generated_narrated = out_dir / "generated_narrated.mp4"
+            mux_audio_to_video(
+                video_path=out_dir / "generated.mp4",
+                audio_path=audio_path,
+                output_path=generated_narrated,
+            )
+            narration_info["audio_path"] = str(audio_path)
+            narration_info["generated_narrated_path"] = str(generated_narrated)
+            narration_info["tts"] = tts_info
+            print(f"  wrote {generated_narrated}")
+            if args.narrate_sidebyside and not args.no_sidebyside:
+                side_narrated = out_dir / "sidebyside_narrated.mp4"
+                mux_audio_to_video(
+                    video_path=out_dir / "sidebyside.mp4",
+                    audio_path=audio_path,
+                    output_path=side_narrated,
+                )
+                narration_info["sidebyside_narrated_path"] = str(side_narrated)
+                print(f"  wrote {side_narrated}")
+        except Exception as e:
+            narration_info["error"] = str(e)
+            print(f"  WARN: narration synthesis/mux failed: {e}")
+
     metadata = {
         "checkpoint": str(ckpt_path.resolve()),
         "args": vars(args),
@@ -557,6 +690,7 @@ def main() -> None:
             else None
         ),
         "gesture_to_int": ckpt_gesture_to_int,
+        "narration": narration_info,
         "frames": per_frame_records,
     }
     meta_path = out_dir / "metadata.json"
