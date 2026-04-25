@@ -480,7 +480,7 @@ def run_generation(
     narration_backend: str = "template",
     ollama_base_url: str = "http://127.0.0.1:11434",
     ollama_model: str = "llama3.2",
-    hf_narration_model: str = "Qwen/Qwen2.5-0.5B-Instruct",
+    hf_narration_model: str = "meta-llama/Llama-3.2-1B-Instruct",
     hf_token: str = "",
 ) -> Tuple[int, Path]:
     """Invoke ``scripts/generate_eval_video.py`` and stream its stdout into
@@ -1122,7 +1122,7 @@ def main() -> None:
             )
             ollama_base_url = "http://127.0.0.1:11434"
             ollama_model = "llama3.2"
-            hf_narration_model = "Qwen/Qwen2.5-0.5B-Instruct"
+            hf_narration_model = "meta-llama/Llama-3.2-1B-Instruct"
             hf_token_ui = ""
             if enable_narration and narration_backend == "ollama":
                 ollama_base_url = st.text_input(

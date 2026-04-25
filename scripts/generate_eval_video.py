@@ -278,9 +278,10 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--hf_narration_model",
-        default="Qwen/Qwen2.5-0.5B-Instruct",
+        default="meta-llama/Llama-3.2-1B-Instruct",
         help=(
-            "HF model id (Inference Providers / router). Must list hf-inference on the Hub."
+            "HF model id for router /v1/chat/completions. Gated models require accepting "
+            "the license on the Hub. See https://huggingface.co/inference/models"
         ),
     )
     p.add_argument(
