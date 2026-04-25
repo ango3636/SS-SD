@@ -3,7 +3,8 @@
 Primary path: **Ollama** (https://ollama.com) — no cloud bill; run a model on the
 **same machine as Python** (default ``http://127.0.0.1:11434``).
 
-Optional: **Hugging Face Inference API** with a read token (free tier limits apply).
+Optional: **Hugging Face Inference Providers** (``router.huggingface.co/hf-inference``)
+with a read token (free tier limits apply; pick a model that lists ``hf-inference``).
 
 **Google Colab / remote GPU VMs:** ``127.0.0.1`` is the notebook server, not your
 laptop. A Cloudflare (or ngrok, etc.) tunnel exposes a *web* URL to your browser;
@@ -33,8 +34,8 @@ from suturing_pipeline.audio.narration_templates import (
 
 DEFAULT_OLLAMA_BASE = "http://127.0.0.1:11434"
 DEFAULT_OLLAMA_MODEL = "llama3.2"
-# Small instruct model often available on HF free inference (swap if your token lacks access).
-DEFAULT_HF_NARRATION_MODEL = "HuggingFaceTB/SmolLM2-360M-Instruct"
+# Small instruct model; must list the ``hf-inference`` provider on the Hub (see HF model filters).
+DEFAULT_HF_NARRATION_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 
 
 def _sanitize_narration_line(raw: str, max_words: int) -> str:
@@ -71,6 +72,22 @@ def _http_json_post(url: str, body: dict, headers: dict, timeout_sec: float) -> 
     try:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             payload = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", errors="replace")[:800]
+        except Exception:
+            pass
+        hint = ""
+        if e.code == 404:
+            hint = (
+                " Pick a model that shows the `hf-inference` provider on the Hub: "
+                "https://huggingface.co/models?inference_provider=hf-inference — "
+                "or pass a different --hf_narration_model."
+            )
+        raise RuntimeError(
+            f"HTTP {e.code} from inference API ({url!r}). {detail} {hint}".strip()
+        ) from e
     except urllib.error.URLError as e:
         hint = ""
         if _is_connection_refused(e):
@@ -125,9 +142,9 @@ def complete_narration_huggingface(
     token: str,
     timeout_sec: float = 120.0,
 ) -> str:
-    """Text generation via Hugging Face Serverless Inference API."""
-    # Classic inference endpoint (works for many causal LMs with a single prompt string).
-    url = f"https://api-inference.huggingface.co/models/{model_id}"
+    """Text generation via Hugging Face Inference Providers (router API)."""
+    # Legacy ``api-inference.huggingface.co`` returns 404 for many models; use router.
+    url = f"https://router.huggingface.co/hf-inference/models/{model_id}"
     body = {
         "inputs": user_prompt,
         "parameters": {
@@ -140,18 +157,7 @@ def complete_narration_huggingface(
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
-    try:
-        data = _http_json_post(url, body, headers=headers, timeout_sec=timeout_sec)
-    except urllib.error.HTTPError as e:
-        detail = ""
-        try:
-            detail = e.read().decode("utf-8", errors="replace")[:500]
-        except Exception:
-            pass
-        raise RuntimeError(
-            f"HuggingFace inference HTTP {e.code} for model {model_id!r}. {detail} "
-            "Check HF_TOKEN access to this model, or use --narration_backend ollama."
-        ) from e
+    data = _http_json_post(url, body, headers=headers, timeout_sec=timeout_sec)
 
     # Response shapes vary: [{"generated_text": "..."}] or {"generated_text": "..."}
     if isinstance(data, list) and data:

@@ -278,8 +278,10 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--hf_narration_model",
-        default="HuggingFaceTB/SmolLM2-360M-Instruct",
-        help="Hugging Face model id when --narration_backend huggingface.",
+        default="Qwen/Qwen2.5-0.5B-Instruct",
+        help=(
+            "HF model id (Inference Providers / router). Must list hf-inference on the Hub."
+        ),
     )
     p.add_argument(
         "--hf_token",
