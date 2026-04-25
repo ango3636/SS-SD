@@ -1060,14 +1060,19 @@ def main() -> None:
             )
             tts_provider = st.selectbox(
                 "Narration provider",
-                options=["gtts"],
+                options=["bark"],
                 index=0,
                 disabled=not enable_narration,
+                help="Bark (suno/bark) is the only supported backend.",
             )
             tts_voice = st.text_input(
-                "Narration language/voice",
-                value="en",
+                "Bark voice preset",
+                value="v2/en_speaker_6",
                 disabled=not enable_narration,
+                help=(
+                    "Pass any Bark voice preset string; 'v2/en_speaker_6' "
+                    "sounds like a calm clinical instructor."
+                ),
             )
             narrate_sidebyside = st.checkbox(
                 "Narrate side-by-side output",

@@ -52,12 +52,23 @@ import torch
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
+from suturing_pipeline.audio.compositor import (
+    generate_shared_audio_track,
+    mux_audio_to_generated_video,
+    mux_audio_to_raw_video,
+    side_by_side_comparison,
+)
 from suturing_pipeline.audio.narration_templates import (
     build_expert_speed_stats,
     build_narration_payload,
     collapse_frame_records,
 )
-from suturing_pipeline.audio.tts import mux_audio_to_video, synthesize_narration_audio
+from suturing_pipeline.audio.tts import (
+    DEFAULT_VOICE_PRESET,
+    BarkTTSConverter,
+    mux_audio_to_video,
+    synthesize_narration_audio,
+)
 from suturing_pipeline.data.jigsaws_dataset import JIGSAWSDataset
 from suturing_pipeline.synthesis.sd_sampler import SDSampler
 
@@ -175,13 +186,24 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--tts_provider",
-        default="gtts",
-        help="TTS backend (currently: gtts).",
+        default="bark",
+        help="TTS backend (currently: bark).",
     )
     p.add_argument(
         "--tts_voice",
-        default="en",
-        help="Voice/language code for the TTS backend.",
+        default=DEFAULT_VOICE_PRESET,
+        help=(
+            "Bark voice preset, e.g. 'v2/en_speaker_6' (calm clinical "
+            "instructor voice, the default)."
+        ),
+    )
+    p.add_argument(
+        "--voice_preset",
+        default=None,
+        help=(
+            "Alias for --tts_voice, also used by --compare for the shared "
+            "Bark narration track."
+        ),
     )
     p.add_argument(
         "--narration_min_segment_sec",
@@ -221,6 +243,24 @@ def _parse_args() -> argparse.Namespace:
             "When narration is enabled, continue even if TTS/mux fails. "
             "By default, narration failures stop the run so silent outputs "
             "do not look like success."
+        ),
+    )
+    p.add_argument(
+        "--compare",
+        action="store_true",
+        help=(
+            "Produce the dual-audio comparison bundle: a shared Bark "
+            "narration WAV muxed independently onto the original "
+            "JIGSAWS .avi AND the generated video, plus a labeled "
+            "side-by-side comparison MP4. Requires --raw_data_root."
+        ),
+    )
+    p.add_argument(
+        "--raw_data_root",
+        default=None,
+        help=(
+            "Path to the JIGSAWS data root used for the raw .avi in "
+            "--compare. Defaults to --data_root when omitted."
         ),
     )
 
@@ -704,6 +744,66 @@ def main() -> None:
             narration_info["error"] = narration_failure
             print(f"  WARN: narration synthesis/mux failed: {e}")
 
+    compare_info: Dict[str, object] = {"enabled": bool(args.compare)}
+    if args.compare:
+        raw_root = args.raw_data_root or args.data_root
+        voice_preset = args.voice_preset or args.tts_voice or DEFAULT_VOICE_PRESET
+        print(
+            f"[compare] generating shared Bark narration for {trial_name} "
+            f"(voice_preset={voice_preset}, raw_data_root={raw_root}) ..."
+        )
+        try:
+            wav_path = generate_shared_audio_track(
+                trial_name=trial_name,
+                task="suturing",
+                data_root=raw_root,
+                output_dir=out_dir,
+                voice_preset=voice_preset,
+                device=args.device,
+            )
+            print(f"[compare] wrote {wav_path}")
+
+            raw_narrated = mux_audio_to_raw_video(
+                trial_name=trial_name,
+                task="suturing",
+                data_root=raw_root,
+                audio_path=wav_path,
+                output_dir=out_dir,
+            )
+            print(f"[compare] wrote {raw_narrated}")
+
+            gen_narrated = mux_audio_to_generated_video(
+                generated_frames_dir=out_dir / "generated.mp4",
+                audio_path=wav_path,
+                trial_name=trial_name,
+                output_dir=out_dir,
+                fps_hint=float(args.fps_out),
+            )
+            print(f"[compare] wrote {gen_narrated}")
+
+            comparison_path = side_by_side_comparison(
+                raw_narrated_path=raw_narrated,
+                generated_narrated_path=gen_narrated,
+                output_path=out_dir / f"{trial_name}_comparison.mp4",
+            )
+            print(f"[compare] wrote {comparison_path}")
+
+            compare_info.update(
+                {
+                    "voice_preset": voice_preset,
+                    "raw_data_root": str(raw_root),
+                    "narration_wav": wav_path,
+                    "raw_narrated_mp4": raw_narrated,
+                    "generated_narrated_mp4": gen_narrated,
+                    "comparison_mp4": comparison_path,
+                }
+            )
+        except Exception as e:
+            compare_info["error"] = str(e)
+            print(f"[compare] WARN: failed: {e}")
+            if not args.allow_narration_failure:
+                raise
+
     metadata = {
         "checkpoint": str(ckpt_path.resolve()),
         "args": vars(args),
@@ -739,6 +839,7 @@ def main() -> None:
         ),
         "gesture_to_int": ckpt_gesture_to_int,
         "narration": narration_info,
+        "compare": compare_info,
         "frames": per_frame_records,
     }
     meta_path = out_dir / "metadata.json"

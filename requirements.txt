@@ -15,7 +15,8 @@ scikit-learn
 Pillow
 streamlit
 imageio-ffmpeg
-gTTS
+moviepy>=2.0.0
+librosa
 ultralytics
 pytest
 google-api-python-client
