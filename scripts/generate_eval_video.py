@@ -174,14 +174,12 @@ def _parse_args() -> argparse.Namespace:
         help="Generate a narration track and mux narrated MP4 artefacts.",
     )
     p.add_argument(
-        "--tts_provider",
-        default="gtts",
-        help="TTS backend (currently: gtts).",
-    )
-    p.add_argument(
-        "--tts_voice",
-        default="en",
-        help="Voice/language code for the TTS backend.",
+        "--voice_preset",
+        default="v2/en_speaker_6",
+        help=(
+            "Bark voice preset (e.g. 'v2/en_speaker_6' for a calm "
+            "clinical-instructor voice)."
+        ),
     )
     p.add_argument(
         "--narration_min_segment_sec",
@@ -224,6 +222,25 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
 
+    # Dual-video comparison pipeline (--compare).
+    p.add_argument(
+        "--compare",
+        action="store_true",
+        help=(
+            "Generate a shared Bark narration WAV and mux it onto BOTH the "
+            "raw JIGSAWS .avi and the SD-generated video, then render a "
+            "labeled side-by-side comparison MP4. Implies narration."
+        ),
+    )
+    p.add_argument(
+        "--raw_data_root",
+        default=None,
+        help=(
+            "Path to the original JIGSAWS data root used to locate the raw "
+            ".avi. Defaults to --data_root when omitted. Used by --compare."
+        ),
+    )
+
     # Temporal anchoring (Tier-1 coherence controls).
     p.add_argument(
         "--anchor_mode",
@@ -250,6 +267,242 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     return p.parse_args()
+
+
+def _build_narration_segments(
+    per_frame_records: List[Dict],
+    int_to_gesture: Dict[int, str],
+    fps_out: float,
+    dataset: "JIGSAWSDataset",
+    trial_idx: int,
+    data_root: str,
+    use_empirical_stats: bool,
+    min_count_for_empirical: int,
+    out_dir: Path,
+) -> List[Dict[str, object]]:
+    """Collapse per-frame records to gesture segments with narration text.
+
+    Extracted from the legacy inline block so both ``--enable_narration``
+    and ``--compare`` can share it.
+    """
+    expert_stats: Dict[str, Dict[str, float]] = {}
+    if use_empirical_stats:
+        try:
+            expert_stats = build_expert_speed_stats(data_root)
+            print(
+                f"  expert speed stats loaded for {len(expert_stats)} gestures"
+            )
+        except Exception as e:  # pragma: no cover - defensive runtime path
+            print(f"  WARN: expert speed stats unavailable: {e}")
+            expert_stats = {}
+    collapsed = collapse_frame_records(
+        per_frame_records=per_frame_records,
+        int_to_gesture=int_to_gesture,
+        fps_out=fps_out,
+    )
+    narration_segments: List[Dict[str, object]] = []
+    for seg in collapsed:
+        src_frames = np.asarray(seg["source_frames"], dtype=np.int64)
+        kin_segment = dataset._kinematics[trial_idx][src_frames]
+        payload = build_narration_payload(
+            gesture_label=str(seg["gesture"]),
+            kinematic_segment=kin_segment,
+            expert_speed_stats=expert_stats,
+            min_count_for_empirical=min_count_for_empirical,
+        )
+        narration_segments.append(
+            {
+                "start_time": round(float(seg["start_time"]), 4),
+                "end_time": round(float(seg["end_time"]), 4),
+                "start_output_index": int(seg["start_output_index"]),
+                "end_output_index": int(seg["end_output_index"]),
+                "gesture": seg["gesture"],
+                "gesture_int": int(seg["gesture_int"]),
+                "source_frames": seg["source_frames"],
+                "summary": payload["summary"],
+                "narration_text": payload["narration_text"],
+                "gesture_description": payload["gesture_description"],
+            }
+        )
+    segments_path = out_dir / "narration_segments.json"
+    segments_path.write_text(
+        json.dumps(narration_segments, indent=2), encoding="utf-8"
+    )
+    print(f"  wrote {segments_path}")
+    return narration_segments
+
+
+def generate_shared_audio_track(
+    trial_name: str,
+    narration_segments: List[Dict[str, object]],
+    out_dir: Path,
+    voice_preset: str = "v2/en_speaker_6",
+    min_segment_seconds: float = 0.5,
+) -> Path:
+    """Synthesize the shared Bark narration and write ``{trial}_narration.wav``.
+
+    Returns the WAV path. Both the raw and generated videos are driven by
+    the same kinematics/transcription so a single audio track is correct
+    for both.
+    """
+    audio_path = out_dir / f"{trial_name}_narration.wav"
+    synthesize_narration_audio(
+        segments=narration_segments,
+        output_audio_path=audio_path,
+        provider="bark",
+        voice=voice_preset,
+        min_segment_seconds=min_segment_seconds,
+    )
+    return audio_path
+
+
+def mux_audio_to_raw_video(
+    trial_name: str,
+    raw_video_path: Path,
+    audio_path: Path,
+    out_dir: Path,
+) -> Path:
+    """Mux the shared narration onto the original JIGSAWS .avi via moviepy.
+
+    Writes ``{out_dir}/{trial_name}_raw_narrated.mp4`` and returns it.
+    """
+    try:
+        from moviepy.editor import AudioFileClip, VideoFileClip
+    except ImportError as e:
+        raise RuntimeError(
+            "moviepy is required for --compare. Install with `pip install moviepy`."
+        ) from e
+
+    out_path = out_dir / f"{trial_name}_raw_narrated.mp4"
+    video = VideoFileClip(str(raw_video_path))
+    audio = AudioFileClip(str(audio_path))
+    dur = min(video.duration, audio.duration)
+    narrated = video.subclip(0, dur).set_audio(audio.subclip(0, dur))
+    try:
+        narrated.write_videofile(
+            str(out_path),
+            codec="libx264",
+            audio_codec="aac",
+            logger=None,
+        )
+    finally:
+        narrated.close()
+        video.close()
+        audio.close()
+    return out_path
+
+
+def mux_audio_to_generated_video(
+    generated_video_path: Path,
+    audio_path: Path,
+    trial_name: str,
+    out_dir: Path,
+) -> Path:
+    """Mux the shared narration onto the SD-generated video via moviepy.
+
+    Writes ``{out_dir}/{trial_name}_generated_narrated.mp4`` and returns it.
+    """
+    try:
+        from moviepy.editor import AudioFileClip, VideoFileClip
+    except ImportError as e:
+        raise RuntimeError(
+            "moviepy is required for --compare. Install with `pip install moviepy`."
+        ) from e
+
+    out_path = out_dir / f"{trial_name}_generated_narrated.mp4"
+    video = VideoFileClip(str(generated_video_path))
+    audio = AudioFileClip(str(audio_path))
+    dur = min(video.duration, audio.duration)
+    narrated = video.subclip(0, dur).set_audio(audio.subclip(0, dur))
+    try:
+        narrated.write_videofile(
+            str(out_path),
+            codec="libx264",
+            audio_codec="aac",
+            logger=None,
+        )
+    finally:
+        narrated.close()
+        video.close()
+        audio.close()
+    return out_path
+
+
+def side_by_side_comparison(
+    raw_narrated_path: Path,
+    generated_narrated_path: Path,
+    out_path: Path,
+) -> Path:
+    """Compose labeled "Original | Generated" side-by-side with narration.
+
+    Audio is taken from ``generated_narrated_path`` only (both clips share
+    the same narration track, so muxing twice would double the level).
+    """
+    try:
+        from moviepy.editor import (
+            AudioFileClip,
+            CompositeVideoClip,
+            TextClip,
+            VideoFileClip,
+            clips_array,
+        )
+    except ImportError as e:
+        raise RuntimeError(
+            "moviepy is required for --compare. Install with `pip install moviepy`."
+        ) from e
+
+    raw_clip = VideoFileClip(str(raw_narrated_path))
+    gen_clip = VideoFileClip(str(generated_narrated_path))
+    # Normalize heights so they can be stacked horizontally.
+    target_h = min(raw_clip.h, gen_clip.h)
+    raw_resized = (
+        raw_clip.resize(height=target_h) if raw_clip.h != target_h else raw_clip
+    )
+    gen_resized = (
+        gen_clip.resize(height=target_h) if gen_clip.h != target_h else gen_clip
+    )
+    dur = min(raw_resized.duration, gen_resized.duration)
+    raw_sub = raw_resized.subclip(0, dur).without_audio()
+    gen_sub = gen_resized.subclip(0, dur).without_audio()
+
+    side = clips_array([[raw_sub, gen_sub]])
+
+    label_kwargs = dict(fontsize=28, color="white", method="label")
+    try:
+        raw_label = TextClip("Original", bg_color="black", **label_kwargs)
+        gen_label = TextClip("Generated", bg_color="black", **label_kwargs)
+    except Exception:
+        # ImageMagick not installed: fall back to captions with no bg.
+        raw_label = TextClip("Original", **label_kwargs)
+        gen_label = TextClip("Generated", **label_kwargs)
+    raw_label = raw_label.set_duration(dur).set_position((10, 10))
+    gen_label = gen_label.set_duration(dur).set_position(
+        (raw_sub.w + 10, 10)
+    )
+
+    shared_audio = AudioFileClip(str(generated_narrated_path))
+    audio_dur = min(dur, shared_audio.duration)
+    composite = CompositeVideoClip([side, raw_label, gen_label]).set_audio(
+        shared_audio.subclip(0, audio_dur)
+    )
+    try:
+        composite.write_videofile(
+            str(out_path),
+            codec="libx264",
+            audio_codec="aac",
+            logger=None,
+        )
+    finally:
+        composite.close()
+        side.close()
+        raw_label.close()
+        gen_label.close()
+        raw_sub.close()
+        gen_sub.close()
+        raw_clip.close()
+        gen_clip.close()
+        shared_audio.close()
+    return out_path
 
 
 def _tensor_to_uint8_rgb(frame_tensor: torch.Tensor) -> np.ndarray:
@@ -585,61 +838,33 @@ def main() -> None:
             "or an error during the first SD sample. Check the log above and re-run."
         )
 
-    narration_info: Dict[str, object] = {"enabled": bool(args.enable_narration)}
+    narration_enabled = bool(args.enable_narration or args.compare)
+    narration_info: Dict[str, object] = {
+        "enabled": narration_enabled,
+        "compare": bool(args.compare),
+    }
     narration_failure: Optional[str] = None
-    if args.enable_narration:
+    if narration_enabled:
         print("Building narration segments ...")
-        expert_stats: Dict[str, Dict[str, float]] = {}
-        if not args.disable_empirical_speed_stats:
-            try:
-                expert_stats = build_expert_speed_stats(args.data_root)
-                print(
-                    f"  expert speed stats loaded for {len(expert_stats)} gestures"
-                )
-            except Exception as e:  # pragma: no cover - defensive runtime path
-                print(f"  WARN: expert speed stats unavailable: {e}")
-                expert_stats = {}
-        collapsed = collapse_frame_records(
+        narration_segments = _build_narration_segments(
             per_frame_records=per_frame_records,
             int_to_gesture=int_to_gesture,
             fps_out=args.fps_out,
+            dataset=dataset,
+            trial_idx=trial_idx,
+            data_root=args.data_root,
+            use_empirical_stats=not args.disable_empirical_speed_stats,
+            min_count_for_empirical=args.narration_min_empirical_count,
+            out_dir=out_dir,
         )
-        narration_segments: List[Dict[str, object]] = []
-        for seg in collapsed:
-            src_frames = np.asarray(seg["source_frames"], dtype=np.int64)
-            kin_segment = dataset._kinematics[trial_idx][src_frames]
-            payload = build_narration_payload(
-                gesture_label=str(seg["gesture"]),
-                kinematic_segment=kin_segment,
-                expert_speed_stats=expert_stats,
-                min_count_for_empirical=args.narration_min_empirical_count,
-            )
-            narration_segments.append(
-                {
-                    "start_time": round(float(seg["start_time"]), 4),
-                    "end_time": round(float(seg["end_time"]), 4),
-                    "start_output_index": int(seg["start_output_index"]),
-                    "end_output_index": int(seg["end_output_index"]),
-                    "gesture": seg["gesture"],
-                    "gesture_int": int(seg["gesture_int"]),
-                    "source_frames": seg["source_frames"],
-                    "summary": payload["summary"],
-                    "narration_text": payload["narration_text"],
-                    "gesture_description": payload["gesture_description"],
-                }
-            )
         segments_path = out_dir / "narration_segments.json"
-        segments_path.write_text(
-            json.dumps(narration_segments, indent=2), encoding="utf-8"
-        )
-        print(f"  wrote {segments_path}")
 
         narration_info.update(
             {
                 "segments_path": str(segments_path),
                 "segment_count": len(narration_segments),
-                "tts_provider": args.tts_provider,
-                "tts_voice": args.tts_voice,
+                "tts_provider": "bark",
+                "voice_preset": args.voice_preset,
                 "used_empirical_stats": not args.disable_empirical_speed_stats,
             }
         )
@@ -648,8 +873,8 @@ def main() -> None:
             tts_info = synthesize_narration_audio(
                 segments=narration_segments,
                 output_audio_path=audio_path,
-                provider=args.tts_provider,
-                voice=args.tts_voice,
+                provider="bark",
+                voice=args.voice_preset,
                 min_segment_seconds=args.narration_min_segment_sec,
             )
             narration_info["audio_path"] = str(audio_path)
@@ -699,6 +924,69 @@ def main() -> None:
                     )
                     narration_info["sidebyside_narrated_path"] = str(side_narrated)
                     print(f"  wrote {side_narrated}")
+
+            if args.compare:
+                print("Building --compare dual-video artefacts ...")
+                compare_info: Dict[str, object] = {}
+
+                raw_root = args.raw_data_root or args.data_root
+                raw_video_src = video_path
+                if args.raw_data_root:
+                    # Allow an explicit override root; locate the same
+                    # trial file under it.
+                    override = (
+                        Path(raw_root)
+                        / video_path.parent.parent.name
+                        / video_path.parent.name
+                        / video_path.name
+                    )
+                    if override.exists():
+                        raw_video_src = override
+                    else:
+                        print(
+                            f"  WARN: --raw_data_root {raw_root} does not "
+                            f"contain {video_path.name}; falling back to "
+                            f"{video_path}"
+                        )
+
+                shared_wav = generate_shared_audio_track(
+                    trial_name=trial_name,
+                    narration_segments=narration_segments,
+                    out_dir=out_dir,
+                    voice_preset=args.voice_preset,
+                    min_segment_seconds=args.narration_min_segment_sec,
+                )
+                print(f"  wrote {shared_wav}")
+                compare_info["shared_audio_wav"] = str(shared_wav)
+
+                raw_narrated = mux_audio_to_raw_video(
+                    trial_name=trial_name,
+                    raw_video_path=raw_video_src,
+                    audio_path=shared_wav,
+                    out_dir=out_dir,
+                )
+                print(f"  wrote {raw_narrated}")
+                compare_info["raw_narrated_path"] = str(raw_narrated)
+
+                gen_narrated = mux_audio_to_generated_video(
+                    generated_video_path=out_dir / "generated.mp4",
+                    audio_path=shared_wav,
+                    trial_name=trial_name,
+                    out_dir=out_dir,
+                )
+                print(f"  wrote {gen_narrated}")
+                compare_info["generated_narrated_path"] = str(gen_narrated)
+
+                comparison_path = out_dir / f"{trial_name}_comparison.mp4"
+                side_by_side_comparison(
+                    raw_narrated_path=raw_narrated,
+                    generated_narrated_path=gen_narrated,
+                    out_path=comparison_path,
+                )
+                print(f"  wrote {comparison_path}")
+                compare_info["comparison_path"] = str(comparison_path)
+                compare_info["raw_video_source"] = str(raw_video_src)
+                narration_info["compare_artefacts"] = compare_info
         except Exception as e:
             narration_failure = str(e)
             narration_info["error"] = narration_failure
@@ -744,7 +1032,7 @@ def main() -> None:
     meta_path = out_dir / "metadata.json"
     meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print(f"Wrote {meta_path}")
-    if args.enable_narration and narration_failure and not args.allow_narration_failure:
+    if narration_enabled and narration_failure and not args.allow_narration_failure:
         raise SystemExit(
             "Narration was enabled but failed; aborting to avoid silent outputs. "
             "See metadata['narration']['error'] for details, or rerun with "

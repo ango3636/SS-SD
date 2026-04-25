@@ -472,8 +472,7 @@ def run_generation(
     progress_bar,
     eta_text,
     enable_narration: bool,
-    tts_provider: str,
-    tts_voice: str,
+    voice_preset: str,
     narrate_sidebyside: bool,
     narration_default_outputs: bool,
 ) -> Tuple[int, Path]:
@@ -509,10 +508,8 @@ def run_generation(
         cmd.extend(
             [
                 "--enable_narration",
-                "--tts_provider",
-                tts_provider,
-                "--tts_voice",
-                tts_voice,
+                "--voice_preset",
+                voice_preset,
             ]
         )
         if narrate_sidebyside:
@@ -1058,15 +1055,13 @@ def main() -> None:
                 value=False,
                 help="Generate gesture-aligned spoken commentary and mux into output MP4s.",
             )
-            tts_provider = st.selectbox(
-                "Narration provider",
-                options=["gtts"],
-                index=0,
-                disabled=not enable_narration,
-            )
-            tts_voice = st.text_input(
-                "Narration language/voice",
-                value="en",
+            voice_preset = st.text_input(
+                "Bark voice preset",
+                value="v2/en_speaker_6",
+                help=(
+                    "Bark voice preset (e.g. v2/en_speaker_6 for a calm "
+                    "clinical-instructor voice)."
+                ),
                 disabled=not enable_narration,
             )
             narrate_sidebyside = st.checkbox(
@@ -1279,8 +1274,7 @@ def main() -> None:
                 progress_bar=progress_bar,
                 eta_text=eta_text,
                 enable_narration=bool(enable_narration),
-                tts_provider=str(tts_provider),
-                tts_voice=str(tts_voice),
+                voice_preset=str(voice_preset),
                 narrate_sidebyside=bool(narrate_sidebyside),
                 narration_default_outputs=bool(narration_default_outputs),
             )
