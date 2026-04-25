@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
 import sys
 import time
@@ -465,6 +466,18 @@ def main() -> None:
         print(
             "WARN: --narration_backend is only used when narration audio is built "
             "(--enable_narration or --compare); template text is unused this run."
+        )
+    if (
+        args.narration_backend == "ollama"
+        and os.environ.get("COLAB_RELEASE_TAG")
+    ):
+        print(
+            "NOTE (Google Colab): Ollama defaults to http://127.0.0.1:11434 on *this* "
+            "runtime (the Colab VM). A Cloudflare tunnel only exposes web pages to "
+            "your browser; it does not route urllib from this Python process to "
+            "Ollama on your home machine. Options: install/run Ollama inside Colab "
+            "(heavy), or use --narration_backend huggingface with HF_TOKEN / "
+            "--hf_token, or keep --narration_backend template."
         )
 
     print(

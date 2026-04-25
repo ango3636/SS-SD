@@ -1,8 +1,16 @@
 """Free / local LLM backends for gesture narration (text before Bark TTS).
 
-Primary path: **Ollama** (https://ollama.com) — no cloud bill; run a model locally.
+Primary path: **Ollama** (https://ollama.com) — no cloud bill; run a model on the
+**same machine as Python** (default ``http://127.0.0.1:11434``).
 
 Optional: **Hugging Face Inference API** with a read token (free tier limits apply).
+
+**Google Colab / remote GPU VMs:** ``127.0.0.1`` is the notebook server, not your
+laptop. A Cloudflare (or ngrok, etc.) tunnel exposes a *web* URL to your browser;
+it does **not** make ``urllib`` calls from Colab reach Ollama on your home PC.
+Use ``--narration_backend huggingface`` with ``HF_TOKEN``, install Ollama *inside*
+the VM, or point ``--ollama_base_url`` at an Ollama instance that is actually
+reachable from that VM (advanced).
 
 Flow is always speech-first: build prompt → LLM returns one line → sanitize →
 Bark consumes ``narration_text``.
@@ -43,13 +51,46 @@ def _sanitize_narration_line(raw: str, max_words: int) -> str:
     return s
 
 
+def _is_connection_refused(exc: BaseException) -> bool:
+    s = str(exc).lower()
+    if "connection refused" in s or "[errno 111]" in s or "errno 111" in s:
+        return True
+    r = getattr(exc, "reason", None)
+    if isinstance(r, OSError) and r.errno == 111:
+        return True
+    if isinstance(r, ConnectionRefusedError):
+        return True
+    return False
+
+
 def _http_json_post(url: str, body: dict, headers: dict, timeout_sec: float) -> dict:
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(
         url, data=data, headers=headers, method="POST"
     )
-    with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
-        payload = resp.read().decode("utf-8")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            payload = resp.read().decode("utf-8")
+    except urllib.error.URLError as e:
+        hint = ""
+        if _is_connection_refused(e):
+            if "127.0.0.1" in url or "localhost" in url:
+                hint = (
+                    " Nothing is listening on this host/port. For Ollama: start the "
+                    "daemon on *this same machine* (`ollama serve` or the Ollama app), "
+                    "then `ollama pull <model>` (e.g. llama3.2). "
+                    "If this code runs on a remote server or Colab, 127.0.0.1 refers to "
+                    "that remote box—not your laptop; install/run Ollama there, use an "
+                    "SSH tunnel, or switch to --narration_backend huggingface with HF_TOKEN."
+                )
+            elif "huggingface" in url.lower():
+                hint = (
+                    " Outbound HTTPS to Hugging Face was refused or blocked. "
+                    "Try another network/VPN, or confirm no proxy sends inference traffic to localhost."
+                )
+        raise RuntimeError(
+            f"LLM HTTP request failed for {url!r}: {e!s}.{hint}"
+        ) from e
     return json.loads(payload)
 
 

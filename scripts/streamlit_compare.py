@@ -1150,6 +1150,17 @@ def main() -> None:
                         "(not shown in the logged shell command)."
                     ),
                 )
+            if (
+                enable_narration
+                and narration_backend == "ollama"
+                and os.environ.get("COLAB_RELEASE_TAG")
+            ):
+                st.warning(
+                    "**Colab:** Ollama uses `127.0.0.1` on *this* notebook VM, not your "
+                    "home PC. A Cloudflare tunnel does not bridge Python HTTP to your "
+                    "laptop. Prefer **huggingface** + HF token here, or install Ollama "
+                    "inside Colab."
+                )
 
     existing_runs = scan_existing_runs()
     if existing_runs:
