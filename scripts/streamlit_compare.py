@@ -13,6 +13,7 @@ MP4s back into the page.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -476,6 +477,11 @@ def run_generation(
     tts_voice: str,
     narrate_sidebyside: bool,
     narration_default_outputs: bool,
+    narration_backend: str = "template",
+    ollama_base_url: str = "http://127.0.0.1:11434",
+    ollama_model: str = "llama3.2",
+    hf_narration_model: str = "HuggingFaceTB/SmolLM2-360M-Instruct",
+    hf_token: str = "",
 ) -> Tuple[int, Path]:
     """Invoke ``scripts/generate_eval_video.py`` and stream its stdout into
     the given streamlit container, updating ``progress_bar`` / ``eta_text``
@@ -483,6 +489,7 @@ def run_generation(
     """
     out_dir = OUTPUT_ROOT / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
 
     cmd = [
         sys.executable,
@@ -519,6 +526,23 @@ def run_generation(
             cmd.append("--narrate_sidebyside")
         if narration_default_outputs:
             cmd.append("--narration_default_outputs")
+        nb = (narration_backend or "template").strip().lower()
+        if nb != "template":
+            cmd.extend(["--narration_backend", nb])
+            if nb == "ollama":
+                cmd.extend(
+                    [
+                        "--ollama_base_url",
+                        ollama_base_url,
+                        "--ollama_model",
+                        ollama_model,
+                    ]
+                )
+            if nb in ("huggingface", "hf"):
+                cmd.extend(["--hf_narration_model", hf_narration_model])
+                tok = (hf_token or "").strip()
+                if tok:
+                    env["HF_TOKEN"] = tok
 
     log_container.code(" ".join(cmd), language="bash")
     live = log_container.empty()
@@ -530,6 +554,7 @@ def run_generation(
     proc = subprocess.Popen(
         cmd,
         cwd=str(REPO_ROOT),
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -1085,6 +1110,46 @@ def main() -> None:
                 disabled=not enable_narration,
                 help="If disabled, narrated copies are written as *_narrated.mp4 instead.",
             )
+            narration_backend = st.selectbox(
+                "Narration text (before Bark)",
+                options=["template", "ollama", "huggingface"],
+                index=0,
+                disabled=not enable_narration,
+                help=(
+                    "template: kinematic sentences. ollama: free local LLM. "
+                    "huggingface: HF Inference API (HF_TOKEN env or token field below)."
+                ),
+            )
+            ollama_base_url = "http://127.0.0.1:11434"
+            ollama_model = "llama3.2"
+            hf_narration_model = "HuggingFaceTB/SmolLM2-360M-Instruct"
+            hf_token_ui = ""
+            if enable_narration and narration_backend == "ollama":
+                ollama_base_url = st.text_input(
+                    "Ollama base URL",
+                    value=ollama_base_url,
+                    help="Default http://127.0.0.1:11434 — run `ollama serve` locally.",
+                )
+                ollama_model = st.text_input(
+                    "Ollama model",
+                    value=ollama_model,
+                    help="Example: llama3.2, mistral, qwen2.5:7b",
+                )
+            if enable_narration and narration_backend == "huggingface":
+                hf_narration_model = st.text_input(
+                    "Hugging Face model id",
+                    value=hf_narration_model,
+                )
+                hf_token_ui = st.text_input(
+                    "Hugging Face read token",
+                    type="password",
+                    value="",
+                    help=(
+                        "Optional if the process already has HF_TOKEN set. "
+                        "The token is passed via environment to the child process "
+                        "(not shown in the logged shell command)."
+                    ),
+                )
 
     existing_runs = scan_existing_runs()
     if existing_runs:
@@ -1288,6 +1353,11 @@ def main() -> None:
                 tts_voice=str(tts_voice),
                 narrate_sidebyside=bool(narrate_sidebyside),
                 narration_default_outputs=bool(narration_default_outputs),
+                narration_backend=str(narration_backend),
+                ollama_base_url=str(ollama_base_url),
+                ollama_model=str(ollama_model),
+                hf_narration_model=str(hf_narration_model),
+                hf_token=str(hf_token_ui),
             )
         dt = time.time() - t0
         if rc != 0:

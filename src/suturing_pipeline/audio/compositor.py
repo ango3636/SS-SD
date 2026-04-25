@@ -21,6 +21,12 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
+from suturing_pipeline.audio.llm_narration import (
+    DEFAULT_HF_NARRATION_MODEL,
+    DEFAULT_OLLAMA_BASE,
+    DEFAULT_OLLAMA_MODEL,
+    apply_llm_narration_to_segments,
+)
 from suturing_pipeline.audio.narration_templates import (
     GESTURE_DESCRIPTIONS,
     build_expert_speed_stats,
@@ -140,19 +146,24 @@ def generate_shared_audio_track(
     task: str,
     data_root: str | Path,
     output_dir: str | Path,
-    api_key: Optional[str] = None,  # reserved for future LLM narration backends
+    api_key: Optional[str] = None,  # reserved; use hf_token for HF narration
     voice_preset: str = DEFAULT_VOICE_PRESET,
     tts_converter: Optional[BarkTTSConverter] = None,
     device: Optional[str] = None,
     min_segment_seconds: float = 0.5,
     or_ambience: bool = False,
+    narration_backend: str = "template",
+    ollama_base_url: str = DEFAULT_OLLAMA_BASE,
+    ollama_model: str = DEFAULT_OLLAMA_MODEL,
+    hf_narration_model: str = DEFAULT_HF_NARRATION_MODEL,
+    hf_token: Optional[str] = None,
+    narration_llm_timeout_sec: float = 120.0,
 ) -> str:
     """Build one Bark narration WAV covering the full JIGSAWS trial.
 
-    Both the raw and the generated video will consume this same file,
-    which is why ``api_key`` is kept on the signature - it is not used
-    by the Bark backend today, but the compositor contract stays stable
-    if we later add an LLM narration pass.
+    When ``narration_backend`` is ``ollama`` or ``huggingface``, each segment's
+    ``narration_text`` is produced by an LLM first (speech-first), then Bark
+    synthesises audio. ``template`` keeps the built-in kinematic templates.
 
     The returned path is ``<output_dir>/<trial_name>_narration.wav``.
     """
@@ -179,6 +190,15 @@ def generate_shared_audio_track(
         raise RuntimeError(
             f"No narratable segments extracted for trial {trial_name!r}."
         )
+    segments = apply_llm_narration_to_segments(
+        segments,
+        backend=narration_backend,
+        ollama_base_url=ollama_base_url,
+        ollama_model=ollama_model,
+        hf_model=hf_narration_model,
+        hf_token=hf_token,
+        timeout_sec=narration_llm_timeout_sec,
+    )
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

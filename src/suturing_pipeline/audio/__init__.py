@@ -1,5 +1,12 @@
 """Audio and narration helpers for surgical-video generation."""
 
+from .llm_narration import (
+    DEFAULT_HF_NARRATION_MODEL,
+    DEFAULT_OLLAMA_BASE,
+    DEFAULT_OLLAMA_MODEL,
+    apply_llm_narration_to_segments,
+    synthesize_narration_line,
+)
 from .narration_templates import (
     GESTURE_AMBIENCE,
     GESTURE_DESCRIPTIONS,
@@ -26,6 +33,11 @@ from .compositor import (
 )
 
 __all__ = [
+    "DEFAULT_HF_NARRATION_MODEL",
+    "DEFAULT_OLLAMA_BASE",
+    "DEFAULT_OLLAMA_MODEL",
+    "apply_llm_narration_to_segments",
+    "synthesize_narration_line",
     "GESTURE_DESCRIPTIONS",
     "GESTURE_AMBIENCE",
     "extract_kinematic_summary",

@@ -58,6 +58,7 @@ from suturing_pipeline.audio.compositor import (
     mux_audio_to_raw_video,
     side_by_side_comparison,
 )
+from suturing_pipeline.audio.llm_narration import apply_llm_narration_to_segments
 from suturing_pipeline.audio.narration_templates import (
     build_expert_speed_stats,
     build_narration_payload,
@@ -255,6 +256,42 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--narration_backend",
+        choices=["template", "ollama", "huggingface", "hf"],
+        default="template",
+        help=(
+            "How to produce spoken lines before Bark: 'template' (deterministic "
+            "kinematic text), 'ollama' (free local LLM, install Ollama), or "
+            "'huggingface' / 'hf' (HF Inference API; set HF_TOKEN or --hf_token)."
+        ),
+    )
+    p.add_argument(
+        "--ollama_base_url",
+        default="http://127.0.0.1:11434",
+        help="Ollama server URL when --narration_backend ollama.",
+    )
+    p.add_argument(
+        "--ollama_model",
+        default="llama3.2",
+        help="Ollama model tag (e.g. llama3.2, mistral, qwen2.5:7b).",
+    )
+    p.add_argument(
+        "--hf_narration_model",
+        default="HuggingFaceTB/SmolLM2-360M-Instruct",
+        help="Hugging Face model id when --narration_backend huggingface.",
+    )
+    p.add_argument(
+        "--hf_token",
+        default=None,
+        help="Hugging Face read token (optional if HF_TOKEN is set in the environment).",
+    )
+    p.add_argument(
+        "--narration_llm_timeout_sec",
+        type=float,
+        default=120.0,
+        help="Per-segment HTTP timeout when calling Ollama or Hugging Face.",
+    )
+    p.add_argument(
         "--compare",
         action="store_true",
         help=(
@@ -419,6 +456,15 @@ def main() -> None:
         print(
             "WARN: --or_ambience only applies when narration audio is built "
             "(--enable_narration or --compare); it has no effect on this run."
+        )
+    if (
+        args.narration_backend != "template"
+        and not args.enable_narration
+        and not args.compare
+    ):
+        print(
+            "WARN: --narration_backend is only used when narration audio is built "
+            "(--enable_narration or --compare); template text is unused this run."
         )
 
     print(
@@ -682,6 +728,20 @@ def main() -> None:
                     "gesture_description": payload["gesture_description"],
                 }
             )
+        if args.narration_backend != "template":
+            print(
+                f"  LLM narration ({args.narration_backend}): generating speech text, "
+                "then Bark TTS ..."
+            )
+            narration_segments = apply_llm_narration_to_segments(
+                narration_segments,
+                backend=args.narration_backend,
+                ollama_base_url=args.ollama_base_url,
+                ollama_model=args.ollama_model,
+                hf_model=args.hf_narration_model,
+                hf_token=args.hf_token,
+                timeout_sec=args.narration_llm_timeout_sec,
+            )
         segments_path = out_dir / "narration_segments.json"
         segments_path.write_text(
             json.dumps(narration_segments, indent=2), encoding="utf-8"
@@ -696,6 +756,7 @@ def main() -> None:
                 "tts_voice": args.tts_voice,
                 "used_empirical_stats": not args.disable_empirical_speed_stats,
                 "or_ambience": bool(args.or_ambience),
+                "narration_backend": args.narration_backend,
             }
         )
         try:
@@ -777,6 +838,12 @@ def main() -> None:
                 voice_preset=voice_preset,
                 device=args.device,
                 or_ambience=args.or_ambience,
+                narration_backend=args.narration_backend,
+                ollama_base_url=args.ollama_base_url,
+                ollama_model=args.ollama_model,
+                hf_narration_model=args.hf_narration_model,
+                hf_token=args.hf_token,
+                narration_llm_timeout_sec=args.narration_llm_timeout_sec,
             )
             print(f"[compare] wrote {wav_path}")
 
