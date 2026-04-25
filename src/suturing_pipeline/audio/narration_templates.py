@@ -30,6 +30,72 @@ GESTURE_DESCRIPTIONS: Dict[str, str] = {
     "G15": "Reaching for suture with right hand",
 }
 
+# Text prompts for AudioGen OR ambience (one clip per narration segment, keyed by gesture).
+GESTURE_AMBIENCE: Dict[str, str] = {
+    "DEFAULT": (
+        "Operating room background: quiet ventilation hum, distant sterile "
+        "cart wheels, muffled monitor tones, no speech"
+    ),
+    "G1": (
+        "Operating room ambience, surgeon reaching for needle driver, "
+        "subtle metal instrument tray clicks, HVAC hum"
+    ),
+    "G2": (
+        "OR room tone with focused needle positioning, light fabric rustle, "
+        "steady monitor beep in background"
+    ),
+    "G3": (
+        "Tissue needle pass in operating theatre, soft suction hiss, "
+        "cautery standby hum, quiet staff movement"
+    ),
+    "G4": (
+        "Needle handoff between surgeons in OR, latex glove sounds, "
+        "distant suction and low ventilation"
+    ),
+    "G5": (
+        "Central surgical field ambience, needle held steady, "
+        "instrument trolley resonance, subdued OR chatter"
+    ),
+    "G6": (
+        "Suture pull left hand in OR, thread tension through quiet room, "
+        "monitor pulse ox rhythm faintly"
+    ),
+    "G7": (
+        "Right-hand suture traction in operating room, subtle rope-on-glove sound, "
+        "background suction idle"
+    ),
+    "G8": (
+        "Needle orientation at operative site, small metal clicks, "
+        "standard OR air handling noise"
+    ),
+    "G9": (
+        "Knot tightening in OR, light cord rub, electrocautery unit fan, "
+        "no voices in foreground"
+    ),
+    "G10": (
+        "More suture paid out in sterile field, packaging rustle, "
+        "quiet OR ambience with distant alarms muted"
+    ),
+    "G11": (
+        "Suture dropped, instruments settling on mayo stand, "
+        "end-of-motion OR background hum"
+    ),
+    "G12": (
+        "Left-hand reach for needle in operating theatre, tray percussion, "
+        "soft boot scuff on linoleum"
+    ),
+    "G13": (
+        "C-loop motion left in OR, thread swish, low-frequency room rumble"
+    ),
+    "G14": (
+        "C-loop motion right in OR, thread swish, electrosurgery cart idle tone"
+    ),
+    "G15": (
+        "Reach for suture packet in OR, crinkle of sterile wrapper, "
+        "ventilation and distant equipment beeps"
+    ),
+}
+
 ABSOLUTE_SPEED_THRESHOLDS_MM_S = {
     "slow_max": 30.0,
     "fast_min": 80.0,
@@ -168,6 +234,53 @@ def extract_kinematic_summary(
         "speed_rating_source": speed_source,
         "segment_length_frames": int(seg.shape[0]),
     }
+
+
+def max_narration_words_for_duration(duration_seconds: float) -> int:
+    """Upper bound on narration length for LLM / TTS timing (word count)."""
+    d = float(duration_seconds)
+    if d < 2.0:
+        return 8
+    if d < 4.0:
+        return 15
+    return 25
+
+
+def build_llm_prompt(
+    gesture_label: str,
+    gesture_description: str,
+    kinematic_summary: Dict[str, object],
+    duration_seconds: float,
+) -> str:
+    """Build a system-style instruction block for an LLM narrator.
+
+    Word budget scales with on-screen segment duration. Style targets
+    clinical dictation: crisp observations, numbers spelled out, and
+    ellipses between distinct findings.
+    """
+    max_words = max_narration_words_for_duration(duration_seconds)
+    summary_lines = "\n".join(
+        f"- {key}: {value}" for key, value in sorted(kinematic_summary.items())
+    )
+    return (
+        "You are a surgical skills narrator producing a single spoken line for "
+        "one gesture segment of a laparoscopic suturing trial.\n\n"
+        "STYLE (mandatory):\n"
+        "- Clinical dictation tone: concise, neutral, present tense, as if "
+        "dictating into a microphone in the OR.\n"
+        "- Spell out all numbers in words (e.g. \"three\" not \"3\").\n"
+        "- Separate distinct observations with an ellipsis and space "
+        "(\"... \") so the TTS inserts a short pause between clauses.\n"
+        "- Do not include stage directions, quotes, or meta commentary.\n\n"
+        f"GESTURE: {gesture_label}\n"
+        f"DESCRIPTION: {gesture_description}\n"
+        f"SEGMENT_DURATION_SECONDS: {float(duration_seconds):.3f}\n"
+        f"MAX_WORDS (including spelled-out number words): {max_words}\n\n"
+        "KINEMATIC_SUMMARY:\n"
+        f"{summary_lines}\n\n"
+        f"Respond with at most {max_words} words of narration text only, "
+        "no preamble or bullet list."
+    )
 
 
 def _smoothness_label(motion_smoothness: float) -> str:

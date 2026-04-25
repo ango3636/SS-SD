@@ -1067,10 +1067,10 @@ def main() -> None:
             )
             tts_voice = st.text_input(
                 "Bark voice preset",
-                value="v2/en_speaker_6",
+                value="v2/en_speaker_9",
                 disabled=not enable_narration,
                 help=(
-                    "Pass any Bark voice preset string; 'v2/en_speaker_6' "
+                    "Pass any Bark voice preset string; default is 'v2/en_speaker_9'; "
                     "sounds like a calm clinical instructor."
                 ),
             )

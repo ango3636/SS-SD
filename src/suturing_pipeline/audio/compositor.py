@@ -145,6 +145,7 @@ def generate_shared_audio_track(
     tts_converter: Optional[BarkTTSConverter] = None,
     device: Optional[str] = None,
     min_segment_seconds: float = 0.5,
+    or_ambience: bool = False,
 ) -> str:
     """Build one Bark narration WAV covering the full JIGSAWS trial.
 
@@ -190,6 +191,7 @@ def generate_shared_audio_track(
         segments=segments,
         output_audio_path=wav_path,
         min_segment_seconds=min_segment_seconds,
+        or_ambience=or_ambience,
     )
     return str(wav_path)
 

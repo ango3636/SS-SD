@@ -60,11 +60,25 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--image_size", type=int, default=256)
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--device", default=None)
+    p.add_argument(
+        "--or_ambience",
+        action="store_true",
+        help=(
+            "No effect for single-frame inference. For AudioGen OR ambience under "
+            "Bark, run scripts/generate_eval_video.py with --enable_narration "
+            "and this same flag."
+        ),
+    )
     return p.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+    if getattr(args, "or_ambience", False):
+        print(
+            "Note: --or_ambience is ignored here (no audio track). "
+            "Use scripts/generate_eval_video.py --enable_narration --or_ambience."
+        )
 
     sampler = SDSampler(
         checkpoint_path=args.checkpoint,

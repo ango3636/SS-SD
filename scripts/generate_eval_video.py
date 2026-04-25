@@ -193,8 +193,8 @@ def _parse_args() -> argparse.Namespace:
         "--tts_voice",
         default=DEFAULT_VOICE_PRESET,
         help=(
-            "Bark voice preset, e.g. 'v2/en_speaker_6' (calm clinical "
-            "instructor voice, the default)."
+            "Bark voice preset, e.g. 'v2/en_speaker_9' (default) or "
+            "'v2/en_speaker_6' (alternate clinical tone)."
         ),
     )
     p.add_argument(
@@ -243,6 +243,15 @@ def _parse_args() -> argparse.Namespace:
             "When narration is enabled, continue even if TTS/mux fails. "
             "By default, narration failures stop the run so silent outputs "
             "do not look like success."
+        ),
+    )
+    p.add_argument(
+        "--or_ambience",
+        action="store_true",
+        help=(
+            "Mix facebook/audiogen-medium OR ambience under Bark per gesture "
+            "segment (-18 dB). Requires audiocraft when narration or --compare "
+            "audio is produced."
         ),
     )
     p.add_argument(
@@ -406,6 +415,11 @@ def main() -> None:
     out_dir = Path(args.output_dir) / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output dir: {out_dir}")
+    if args.or_ambience and not args.enable_narration and not args.compare:
+        print(
+            "WARN: --or_ambience only applies when narration audio is built "
+            "(--enable_narration or --compare); it has no effect on this run."
+        )
 
     print(
         f"Building dataset | split={args.dataset_split} split_type={split_type} "
@@ -681,6 +695,7 @@ def main() -> None:
                 "tts_provider": args.tts_provider,
                 "tts_voice": args.tts_voice,
                 "used_empirical_stats": not args.disable_empirical_speed_stats,
+                "or_ambience": bool(args.or_ambience),
             }
         )
         try:
@@ -691,6 +706,7 @@ def main() -> None:
                 provider=args.tts_provider,
                 voice=args.tts_voice,
                 min_segment_seconds=args.narration_min_segment_sec,
+                or_ambience=args.or_ambience,
             )
             narration_info["audio_path"] = str(audio_path)
             narration_info["tts"] = tts_info
@@ -760,6 +776,7 @@ def main() -> None:
                 output_dir=out_dir,
                 voice_preset=voice_preset,
                 device=args.device,
+                or_ambience=args.or_ambience,
             )
             print(f"[compare] wrote {wav_path}")
 
@@ -796,6 +813,7 @@ def main() -> None:
                     "raw_narrated_mp4": raw_narrated,
                     "generated_narrated_mp4": gen_narrated,
                     "comparison_mp4": comparison_path,
+                    "or_ambience": bool(args.or_ambience),
                 }
             )
         except Exception as e:
