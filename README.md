@@ -42,6 +42,8 @@ below.
 | Metrics on a clip pair   | `scripts/video_quality_metrics.py` | SSIM + Farneback optical-flow motion profile, flags flicker/jump windows with plain-language reasons. |
 | Interactive comparison   | `scripts/streamlit_compare.py`   | Streamlit UI: pick a checkpoint + trial + clip length, shells out to `generate_eval_video.py`, embeds the resulting MP4s and the metrics board. |
 
+Optional **gesture-aligned narration** (template, Ollama, or Hugging Face **text** → **Bark** TTS → ffmpeg mux) is explained for users in [docs/audio_generation.md](docs/audio_generation.md); pipeline and file layout details are in [docs/narration_audio.md](docs/narration_audio.md).
+
 ### Diagnostics
 
 These answer *"is the pipeline broken, or is it just undertrained?"*
