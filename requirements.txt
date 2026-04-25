@@ -7,7 +7,7 @@ pyyaml
 tqdm
 torch
 diffusers
-transformers
+transformers>=4.31.0
 accelerate
 peft
 safetensors
@@ -15,7 +15,8 @@ scikit-learn
 Pillow
 streamlit
 imageio-ffmpeg
-gTTS
+librosa
+moviepy
 ultralytics
 pytest
 google-api-python-client

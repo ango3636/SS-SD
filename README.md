@@ -207,11 +207,22 @@ trip JIGSAWS suturing frames at roughly PSNR ~24–27 dB, which is above
 what the current generator reaches. Fine-tuning the VAE is on the
 roadmap but is not the limiting factor today.
 
-**Temporal consistency.** Training is per-frame; there is no temporal
-loss. `generate_eval_video.py` therefore uses a **fixed-seed** noise
-latent across frames by default, which empirically gives the most
-coherent playback. A diffusion-level temporal prior (e.g. AnimateDiff
-or SVD) is the obvious next step.
+**Temporal consistency.** We use Stable Diffusion’s frozen VAE latent
+for each frame independently; the U-Net denoises in that latent grid.
+Conditioning is kinematics and gesture at the same timestep only—not
+the next frame’s latent or the next gesture label. Training is
+per-frame with no temporal loss, so **temporal smoothness in eval
+videos is not from a learned temporal latent model**; it comes from
+**inference-time sampling controls** in `generate_eval_video.py`: by
+default the same RNG **seed** is reused for every frame so the initial
+noise latent is not redrawn independently each time (pass
+`--vary_seed` to use `seed + frame_idx` per frame for more diversity at
+the cost of flicker). Optionally, **`--anchor_mode`** initializes each
+frame from a reference image—previous generated frame, previous real
+frame, or a flow-warped prior—with **`--init_strength`** controlling
+how much of the DDIM schedule runs (SDEdit / img2img temporal
+anchoring). A learned video prior (e.g. AnimateDiff or SVD) is the
+obvious next step if we want coherence without these heuristics.
 
 ## Google Drive OAuth Setup
 
