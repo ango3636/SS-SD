@@ -7,6 +7,7 @@ from .llm_narration import (
     apply_llm_narration_to_segments,
     synthesize_narration_line,
 )
+from .foley import FoleyLibrary
 from .narration_templates import (
     GESTURE_AMBIENCE,
     GESTURE_DESCRIPTIONS,
@@ -39,6 +40,7 @@ __all__ = [
     "apply_llm_narration_to_segments",
     "synthesize_narration_line",
     "GESTURE_DESCRIPTIONS",
+    "FoleyLibrary",
     "GESTURE_AMBIENCE",
     "extract_kinematic_summary",
     "build_expert_speed_stats",

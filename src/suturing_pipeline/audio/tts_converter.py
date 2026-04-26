@@ -10,10 +10,11 @@ import math
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Dict, Optional, Sequence
+from typing import Dict, Literal, Optional, Sequence
 
 import numpy as np
 
+from .foley import FoleyLibrary, place_foley_on_segment
 from .narration_templates import GESTURE_AMBIENCE
 
 BARK_SAMPLE_RATE = 24_000
@@ -269,6 +270,10 @@ class BarkTTSConverter:
         voice_preset: Optional[str] = None,
         or_ambience: bool = False,
         ambience_generator: Optional[ORAmbienceGenerator] = None,
+        foley_dir: Optional[str | Path] = None,
+        foley_gain_db: float = -12.0,
+        foley_align: Literal["start", "center"] = "start",
+        foley_library: Optional[FoleyLibrary] = None,
     ) -> Dict[str, object]:
         valid = [
             s
@@ -291,6 +296,15 @@ class BarkTTSConverter:
 
         amb_gain = _ambience_gain_linear()
 
+        foley_lib: Optional[FoleyLibrary] = None
+        if foley_library is not None:
+            foley_lib = foley_library
+        elif foley_dir:
+            cand = FoleyLibrary(foley_dir, sample_rate=self.sample_rate)
+            foley_lib = cand if cand.enabled else None
+
+        foley_segments = 0
+
         for seg in valid:
             start = max(0.0, float(seg["start_time"]))
             end = max(start + min_segment_seconds, float(seg["end_time"]))
@@ -308,6 +322,18 @@ class BarkTTSConverter:
                 amb = amb_gen.generate_for_prompt(amb_prompt, duration_seconds=duration)
                 amb = _match_length(amb, wav.shape[0])
                 wav = wav + amb.astype(np.float32) * amb_gain
+            if foley_lib is not None:
+                gesture = str(seg.get("gesture", "")).strip() or "G1"
+                foley_wav = foley_lib.get_mono(gesture)
+                if foley_wav is not None:
+                    placed = place_foley_on_segment(
+                        foley_wav,
+                        wav.shape[0],
+                        align=foley_align,
+                    )
+                    fg = float(10.0 ** (foley_gain_db / 20.0))
+                    wav = wav + placed * fg
+                    foley_segments += 1
             start_sample = int(round(start * self.sample_rate))
             end_sample = min(start_sample + wav.shape[0], total_samples)
             if end_sample <= start_sample:
@@ -329,6 +355,10 @@ class BarkTTSConverter:
             "segments": len(valid),
             "duration_seconds": round(total_samples / self.sample_rate, 3),
             "or_ambience": bool(or_ambience),
+            "foley_dir": str(foley_lib.root) if foley_lib is not None else None,
+            "foley_gain_db": float(foley_gain_db) if foley_lib is not None else None,
+            "foley_align": str(foley_align) if foley_lib is not None else None,
+            "foley_segments": int(foley_segments),
         }
 
 
@@ -359,6 +389,10 @@ def synthesize_narration_audio(
     min_segment_seconds: float = 0.35,
     device: Optional[str] = None,
     or_ambience: bool = False,
+    foley_dir: Optional[str | Path] = None,
+    foley_gain_db: float = -12.0,
+    foley_align: Literal["start", "center"] = "start",
+    foley_library: Optional[FoleyLibrary] = None,
 ) -> Dict[str, object]:
     if provider.lower() != "bark":
         raise RuntimeError(
@@ -371,6 +405,10 @@ def synthesize_narration_audio(
         output_audio_path=output_audio_path,
         min_segment_seconds=min_segment_seconds,
         or_ambience=or_ambience,
+        foley_dir=foley_dir,
+        foley_gain_db=foley_gain_db,
+        foley_align=foley_align,
+        foley_library=foley_library,
     )
 
 
@@ -421,6 +459,7 @@ __all__ = [
     "DEFAULT_VOICE_PRESET",
     "BarkTTSConverter",
     "ORAmbienceGenerator",
+    "FoleyLibrary",
     "synthesize_narration_audio",
     "mux_audio_to_video",
 ]

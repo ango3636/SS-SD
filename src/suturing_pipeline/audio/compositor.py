@@ -152,6 +152,9 @@ def generate_shared_audio_track(
     device: Optional[str] = None,
     min_segment_seconds: float = 0.5,
     or_ambience: bool = False,
+    foley_dir: Optional[str | Path] = None,
+    foley_gain_db: float = -12.0,
+    foley_align: str = "start",
     narration_backend: str = "template",
     ollama_base_url: str = DEFAULT_OLLAMA_BASE,
     ollama_model: str = DEFAULT_OLLAMA_MODEL,
@@ -212,6 +215,9 @@ def generate_shared_audio_track(
         output_audio_path=wav_path,
         min_segment_seconds=min_segment_seconds,
         or_ambience=or_ambience,
+        foley_dir=foley_dir,
+        foley_gain_db=foley_gain_db,
+        foley_align=foley_align if foley_align in ("start", "center") else "start",
     )
     return str(wav_path)
 

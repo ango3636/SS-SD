@@ -482,6 +482,9 @@ def run_generation(
     ollama_model: str = "llama3.2",
     hf_narration_model: str = "meta-llama/Llama-3.2-1B-Instruct",
     hf_token: str = "",
+    foley_dir: str = "",
+    foley_gain_db: float = -12.0,
+    foley_align: str = "start",
 ) -> Tuple[int, Path]:
     """Invoke ``scripts/generate_eval_video.py`` and stream its stdout into
     the given streamlit container, updating ``progress_bar`` / ``eta_text``
@@ -543,6 +546,18 @@ def run_generation(
                 tok = (hf_token or "").strip()
                 if tok:
                     env["HF_TOKEN"] = tok
+        fd = (foley_dir or "").strip()
+        if fd:
+            cmd.extend(
+                [
+                    "--foley_dir",
+                    fd,
+                    "--foley_gain_db",
+                    str(float(foley_gain_db)),
+                    "--foley_align",
+                    str(foley_align) if foley_align in ("start", "center") else "start",
+                ]
+            )
 
     log_container.code(" ".join(cmd), language="bash")
     live = log_container.empty()
@@ -1150,6 +1165,29 @@ def main() -> None:
                         "(not shown in the logged shell command)."
                     ),
                 )
+            foley_dir_ui = st.text_input(
+                "Optional foley WAV directory",
+                value="",
+                disabled=not enable_narration,
+                help=(
+                    "Folder with G1.wav … G15.wav (one optional clip per gesture). "
+                    "Mixed under Bark per segment. Leave empty to disable."
+                ),
+            )
+            foley_gain_db_ui = st.slider(
+                "WAV foley level (dB vs segment stem)",
+                -30.0,
+                -3.0,
+                -12.0,
+                1.0,
+                disabled=not enable_narration,
+            )
+            foley_align_ui = st.selectbox(
+                "WAV foley alignment",
+                options=["start", "center"],
+                index=0,
+                disabled=not enable_narration,
+            )
             if (
                 enable_narration
                 and narration_backend == "ollama"
@@ -1369,6 +1407,9 @@ def main() -> None:
                 ollama_model=str(ollama_model),
                 hf_narration_model=str(hf_narration_model),
                 hf_token=str(hf_token_ui),
+                foley_dir=str(foley_dir_ui),
+                foley_gain_db=float(foley_gain_db_ui),
+                foley_align=str(foley_align_ui),
             )
         dt = time.time() - t0
         if rc != 0:

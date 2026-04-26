@@ -3,6 +3,7 @@
 Implementation lives in :mod:`suturing_pipeline.audio.tts_converter`.
 """
 
+from .foley import FoleyLibrary
 from .tts_converter import (
     BARK_SAMPLE_RATE,
     DEFAULT_VOICE_PRESET,
@@ -16,6 +17,7 @@ __all__ = [
     "BARK_SAMPLE_RATE",
     "DEFAULT_VOICE_PRESET",
     "BarkTTSConverter",
+    "FoleyLibrary",
     "ORAmbienceGenerator",
     "synthesize_narration_audio",
     "mux_audio_to_video",

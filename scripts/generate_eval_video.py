@@ -257,6 +257,28 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--foley_dir",
+        default=None,
+        help=(
+            "Optional directory of mono/stereo WAV files named G1.wav … G15.wav "
+            "(case-insensitive stem). Each file is mixed once per matching "
+            "narration segment at --foley_gain_db (default -12 dB), aligned "
+            "with --foley_align. Missing gestures are skipped."
+        ),
+    )
+    p.add_argument(
+        "--foley_gain_db",
+        type=float,
+        default=-12.0,
+        help="Linear mix level for WAV foley relative to the segment stem (voice + optional ambience).",
+    )
+    p.add_argument(
+        "--foley_align",
+        choices=["start", "center"],
+        default="start",
+        help="Where to place each foley clip within the stretched segment duration.",
+    )
+    p.add_argument(
         "--narration_backend",
         choices=["template", "ollama", "huggingface", "hf"],
         default="template",
@@ -772,9 +794,17 @@ def main() -> None:
                 "tts_voice": args.tts_voice,
                 "used_empirical_stats": not args.disable_empirical_speed_stats,
                 "or_ambience": bool(args.or_ambience),
+                "foley_dir": args.foley_dir,
+                "foley_gain_db": float(args.foley_gain_db),
+                "foley_align": str(args.foley_align),
                 "narration_backend": args.narration_backend,
             }
         )
+        if args.foley_dir and not Path(args.foley_dir).expanduser().is_dir():
+            print(
+                f"  WARN: --foley_dir {args.foley_dir!r} is not a directory; "
+                "WAV foley will be skipped."
+            )
         try:
             audio_path = out_dir / "narration_track.m4a"
             tts_info = synthesize_narration_audio(
@@ -784,6 +814,9 @@ def main() -> None:
                 voice=args.tts_voice,
                 min_segment_seconds=args.narration_min_segment_sec,
                 or_ambience=args.or_ambience,
+                foley_dir=args.foley_dir,
+                foley_gain_db=float(args.foley_gain_db),
+                foley_align=args.foley_align,
             )
             narration_info["audio_path"] = str(audio_path)
             narration_info["tts"] = tts_info
@@ -854,6 +887,9 @@ def main() -> None:
                 voice_preset=voice_preset,
                 device=args.device,
                 or_ambience=args.or_ambience,
+                foley_dir=args.foley_dir,
+                foley_gain_db=float(args.foley_gain_db),
+                foley_align=str(args.foley_align),
                 narration_backend=args.narration_backend,
                 ollama_base_url=args.ollama_base_url,
                 ollama_model=args.ollama_model,
@@ -897,6 +933,9 @@ def main() -> None:
                     "generated_narrated_mp4": gen_narrated,
                     "comparison_mp4": comparison_path,
                     "or_ambience": bool(args.or_ambience),
+                    "foley_dir": args.foley_dir,
+                    "foley_gain_db": float(args.foley_gain_db),
+                    "foley_align": str(args.foley_align),
                 }
             )
         except Exception as e:

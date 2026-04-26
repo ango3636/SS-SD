@@ -31,68 +31,72 @@ GESTURE_DESCRIPTIONS: Dict[str, str] = {
 }
 
 # Text prompts for AudioGen OR ambience (one clip per narration segment, keyed by gesture).
+# Wording emphasizes close-mic Foley (needle, thread, metal) plus faint room tone; no speech.
 GESTURE_AMBIENCE: Dict[str, str] = {
     "DEFAULT": (
-        "Operating room background: quiet ventilation hum, distant sterile "
-        "cart wheels, muffled monitor tones, no speech"
+        "Quiet operating theatre air, distant ventilation, very faint monitor "
+        "beeps, no voices, no music"
     ),
     "G1": (
-        "Operating room ambience, surgeon reaching for needle driver, "
-        "subtle metal instrument tray clicks, HVAC hum"
+        "Laparoscopic robot gripper jaws closing on a steel needle, short metallic "
+        "clink and plastic driver housing tick, very close microphone, sterile "
+        "field, faint room hum, no speech"
     ),
     "G2": (
-        "OR room tone with focused needle positioning, light fabric rustle, "
-        "steady monitor beep in background"
+        "Metal needle driver repositioning needle, small sliding scrape on trocar, "
+        "subtle ratchet click, close surgical Foley, low OR rumble, no speech"
     ),
     "G3": (
-        "Tissue needle pass in operating theatre, soft suction hiss, "
-        "cautery standby hum, quiet staff movement"
+        "Single needle puncture through soft tissue, crisp pop then brief friction, "
+        "extreme close-up surgical Foley, no voices, no suction voiceover"
     ),
     "G4": (
-        "Needle handoff between surgeons in OR, latex glove sounds, "
-        "distant suction and low ventilation"
+        "Needle exchange between drivers, two muted metal taps, latex glove rub, "
+        "close instrument Foley, distant OR ventilation only, no speech"
     ),
     "G5": (
-        "Central surgical field ambience, needle held steady, "
-        "instrument trolley resonance, subdued OR chatter"
+        "Needle held steady in jaws, micro-vibration of thread, faint metal resonance, "
+        "tight close mic on tools, almost silent room tone, no speech"
     ),
     "G6": (
-        "Suture pull left hand in OR, thread tension through quiet room, "
-        "monitor pulse ox rhythm faintly"
+        "Braided synthetic suture sliding through tissue and gloved fingers, "
+        "continuous thread zip and light tension creak, close Foley, no voices"
     ),
     "G7": (
-        "Right-hand suture traction in operating room, subtle rope-on-glove sound, "
-        "background suction idle"
+        "Right-hand traction on braided suture, ropey thread hiss through trocar, "
+        "rubber glove squeak, close surgical Foley, no speech"
     ),
     "G8": (
-        "Needle orientation at operative site, small metal clicks, "
-        "standard OR air handling noise"
+        "Needle tip rotating against metal driver, tiny grinding scrape, "
+        "orientation motion Foley, very close mic, no voices"
     ),
     "G9": (
-        "Knot tightening in OR, light cord rub, electrocautery unit fan, "
-        "no voices in foreground"
+        "Suture bundle tightening, cord rub on gloves, soft nylon rasp, "
+        "close knot-tying Foley, no voices"
     ),
     "G10": (
-        "More suture paid out in sterile field, packaging rustle, "
-        "quiet OR ambience with distant alarms muted"
+        "More suture paid out from reel, rapid thread whisper through guides, "
+        "light plastic packaging flutter, close Foley, no speech"
     ),
     "G11": (
-        "Suture dropped, instruments settling on mayo stand, "
-        "end-of-motion OR background hum"
+        "Suture tail released, thread slaps tray softly, instruments settle with "
+        "dull metal clunk, end-of-task Foley, no voices"
     ),
     "G12": (
-        "Left-hand reach for needle in operating theatre, tray percussion, "
-        "soft boot scuff on linoleum"
+        "Left instrument reach, gripper taps needle, ceramic or metal light click, "
+        "close pick-up Foley, faint OR air, no speech"
     ),
     "G13": (
-        "C-loop motion left in OR, thread swish, low-frequency room rumble"
+        "C-loop left: suture whips through air then slides on glove, airy thread swish, "
+        "close motion Foley, no voices"
     ),
     "G14": (
-        "C-loop motion right in OR, thread swish, electrosurgery cart idle tone"
+        "C-loop right: thread swoosh and nylon rasp on driver, quick handoff motion, "
+        "close surgical Foley, no speech"
     ),
     "G15": (
-        "Reach for suture packet in OR, crinkle of sterile wrapper, "
-        "ventilation and distant equipment beeps"
+        "Reach for suture tail, thread pulls from field, soft zipper-like nylon slide, "
+        "close Foley, distant sterile plastic crinkle, no voices"
     ),
 }
 
