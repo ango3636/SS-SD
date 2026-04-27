@@ -100,18 +100,11 @@ def _resample_waveform(
     ).astype(np.float32)
 
 
-def _schedule_narration_segments(
+def _ordered_valid_narration_segments(
     segments: Sequence[Dict[str, object]],
     min_segment_seconds: float,
-) -> List[tuple[float, float, Dict[str, object]]]:
-    """Sort by timeline and delay starts so no two clips share the mix bus.
-
-    JIGSAWS (or collapsed eval) segments can overlap in ``[start_time, end_time]``
-    when annotations are dense or inconsistent; stacking Bark on the same samples
-    makes speech unintelligible. This keeps order, preserves each segment's
-    duration where possible, and pushes a segment forward only when it would
-    otherwise overlap the previous *placed* end.
-    """
+) -> List[Dict[str, object]]:
+    """Filter empty segments and sort by ``(start_time, end_time)``."""
     valid = [
         s
         for s in segments
@@ -120,23 +113,21 @@ def _schedule_narration_segments(
     ]
     if not valid:
         return []
-    ordered = sorted(
+    return sorted(
         valid,
         key=lambda s: (float(s["start_time"]), float(s["end_time"])),
     )
-    scheduled: List[tuple[float, float, Dict[str, object]]] = []
-    mix_cursor = 0.0
-    for seg in ordered:
-        raw_s = max(0.0, float(seg["start_time"]))
-        raw_e = float(seg["end_time"])
-        raw_e = max(raw_s + float(min_segment_seconds), raw_e)
-        start = max(raw_s, mix_cursor)
-        end = max(start + float(min_segment_seconds), raw_e)
-        if end <= start + 1e-9:
-            continue
-        scheduled.append((start, end, seg))
-        mix_cursor = end
-    return scheduled
+
+
+def _pad_waveform_to_min_samples(wav: np.ndarray, min_len: int) -> np.ndarray:
+    """Pad with zeros when shorter than ``min_len``; never truncate."""
+    w = np.asarray(wav, dtype=np.float32).reshape(-1)
+    min_len = max(1, int(min_len))
+    if w.size >= min_len:
+        return w.astype(np.float32)
+    out = np.zeros(min_len, dtype=np.float32)
+    out[: w.size] = w
+    return out
 
 
 def _match_length(wav: np.ndarray, target_len: int) -> np.ndarray:
@@ -314,14 +305,15 @@ class BarkTTSConverter:
         foley_align: Literal["start", "center"] = "start",
         foley_library: Optional[FoleyLibrary] = None,
     ) -> Dict[str, object]:
-        scheduled = _schedule_narration_segments(segments, min_segment_seconds)
-        if not scheduled:
+        ordered = _ordered_valid_narration_segments(segments, min_segment_seconds)
+        if not ordered:
             raise RuntimeError(
                 "No narration segments with valid text/time were provided."
             )
         preset = voice_preset or self.voice_preset
-        total_end = max(end for _, end, _ in scheduled)
-        total_samples = int(round((total_end + 0.25) * self.sample_rate))
+        annot_end = max(float(s["end_time"]) for s in ordered)
+        # Headroom: clips may run past annotation when Bark + stretch caps exceed slot.
+        total_samples = int(round((annot_end + 120.0) * self.sample_rate))
         track = np.zeros(total_samples, dtype=np.float32)
 
         amb_gen = None
@@ -338,20 +330,33 @@ class BarkTTSConverter:
             foley_lib = cand if cand.enabled else None
 
         foley_segments = 0
+        mix_cursor_sec = 0.0
 
-        for start, end, seg in scheduled:
-            duration = end - start
+        for seg in ordered:
+            raw_s = max(0.0, float(seg["start_time"]))
+            raw_e = float(seg["end_time"])
+            raw_e = max(raw_s + float(min_segment_seconds), raw_e)
+            place_start = max(raw_s, mix_cursor_sec)
+            if place_start >= raw_e:
+                target_dur = float(min_segment_seconds)
+            else:
+                target_dur = max(
+                    float(min_segment_seconds),
+                    raw_e - place_start,
+                )
             text = str(seg["narration_text"]).strip()
             wav = self._generate_waveform(text, voice_preset=preset)
             wav = self._fit_duration_with_stretch_trim(
-                wav, self.sample_rate, duration
+                wav, self.sample_rate, target_dur
             )
             if amb_gen is not None:
                 gesture = str(seg.get("gesture", "")).strip() or "G1"
                 amb_prompt = GESTURE_AMBIENCE.get(
                     gesture, GESTURE_AMBIENCE.get("DEFAULT", "")
                 )
-                amb = amb_gen.generate_for_prompt(amb_prompt, duration_seconds=duration)
+                amb = amb_gen.generate_for_prompt(
+                    amb_prompt, duration_seconds=target_dur
+                )
                 amb = _match_length(amb, wav.shape[0])
                 wav = wav + amb.astype(np.float32) * amb_gain
             if foley_lib is not None:
@@ -366,16 +371,23 @@ class BarkTTSConverter:
                     fg = float(10.0 ** (foley_gain_db / 20.0))
                     wav = wav + placed * fg
                     foley_segments += 1
-            # Exact slot length prevents librosa stretch drift from bleeding into the
-            # next segment (overlapping Bark lines).
-            slot_samples = max(1, int(round(float(duration) * self.sample_rate)))
-            wav = _match_length(wav, slot_samples)
-            start_sample = int(round(start * self.sample_rate))
-            end_sample = min(start_sample + wav.shape[0], total_samples)
-            if end_sample <= start_sample:
-                continue
-            slice_len = end_sample - start_sample
-            track[start_sample:end_sample] += wav[:slice_len]
+            # Pad to nominal window when Bark is short; never trim (avoids clipped words).
+            nominal_samples = max(1, int(round(target_dur * self.sample_rate)))
+            wav = _pad_waveform_to_min_samples(wav, nominal_samples)
+            start_sample = int(round(place_start * self.sample_rate))
+            need_end = start_sample + int(wav.shape[0])
+            if need_end > track.shape[0]:
+                pad = need_end - track.shape[0]
+                track = np.pad(track, (0, pad), mode="constant")
+            track[start_sample:need_end] += wav
+            mix_cursor_sec = place_start + float(wav.shape[0]) / float(self.sample_rate)
+
+        # Trim trailing silence past last narration + small tail.
+        last_sample = int(round(mix_cursor_sec * self.sample_rate)) + int(
+            round(0.25 * self.sample_rate)
+        )
+        last_sample = min(max(1, last_sample), track.shape[0])
+        track = track[:last_sample].copy()
 
         peak = float(np.max(np.abs(track))) if track.size else 0.0
         if peak > 1.0:
@@ -383,12 +395,13 @@ class BarkTTSConverter:
 
         out_path = Path(output_audio_path)
         _write_wav_int16(out_path, track, self.sample_rate)
+        total_samples = int(track.shape[0])
         return {
             "audio_path": str(out_path),
             "provider": "bark",
             "voice": preset,
             "sample_rate": self.sample_rate,
-            "segments": len(scheduled),
+            "segments": len(ordered),
             "duration_seconds": round(total_samples / self.sample_rate, 3),
             "or_ambience": bool(or_ambience),
             "foley_dir": str(foley_lib.root) if foley_lib is not None else None,
