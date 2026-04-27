@@ -10,7 +10,7 @@ import math
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Dict, Literal, Optional, Sequence
+from typing import Dict, List, Literal, Optional, Sequence
 
 import numpy as np
 
@@ -98,6 +98,45 @@ def _resample_waveform(
         orig_sr=orig_sr,
         target_sr=target_sr,
     ).astype(np.float32)
+
+
+def _schedule_narration_segments(
+    segments: Sequence[Dict[str, object]],
+    min_segment_seconds: float,
+) -> List[tuple[float, float, Dict[str, object]]]:
+    """Sort by timeline and delay starts so no two clips share the mix bus.
+
+    JIGSAWS (or collapsed eval) segments can overlap in ``[start_time, end_time]``
+    when annotations are dense or inconsistent; stacking Bark on the same samples
+    makes speech unintelligible. This keeps order, preserves each segment's
+    duration where possible, and pushes a segment forward only when it would
+    otherwise overlap the previous *placed* end.
+    """
+    valid = [
+        s
+        for s in segments
+        if str(s.get("narration_text", "")).strip()
+        and float(s.get("end_time", 0.0)) > float(s.get("start_time", 0.0))
+    ]
+    if not valid:
+        return []
+    ordered = sorted(
+        valid,
+        key=lambda s: (float(s["start_time"]), float(s["end_time"])),
+    )
+    scheduled: List[tuple[float, float, Dict[str, object]]] = []
+    mix_cursor = 0.0
+    for seg in ordered:
+        raw_s = max(0.0, float(seg["start_time"]))
+        raw_e = float(seg["end_time"])
+        raw_e = max(raw_s + float(min_segment_seconds), raw_e)
+        start = max(raw_s, mix_cursor)
+        end = max(start + float(min_segment_seconds), raw_e)
+        if end <= start + 1e-9:
+            continue
+        scheduled.append((start, end, seg))
+        mix_cursor = end
+    return scheduled
 
 
 def _match_length(wav: np.ndarray, target_len: int) -> np.ndarray:
@@ -275,18 +314,13 @@ class BarkTTSConverter:
         foley_align: Literal["start", "center"] = "start",
         foley_library: Optional[FoleyLibrary] = None,
     ) -> Dict[str, object]:
-        valid = [
-            s
-            for s in segments
-            if str(s.get("narration_text", "")).strip()
-            and float(s.get("end_time", 0.0)) > float(s.get("start_time", 0.0))
-        ]
-        if not valid:
+        scheduled = _schedule_narration_segments(segments, min_segment_seconds)
+        if not scheduled:
             raise RuntimeError(
                 "No narration segments with valid text/time were provided."
             )
         preset = voice_preset or self.voice_preset
-        total_end = max(float(s["end_time"]) for s in valid)
+        total_end = max(end for _, end, _ in scheduled)
         total_samples = int(round((total_end + 0.25) * self.sample_rate))
         track = np.zeros(total_samples, dtype=np.float32)
 
@@ -305,9 +339,7 @@ class BarkTTSConverter:
 
         foley_segments = 0
 
-        for seg in valid:
-            start = max(0.0, float(seg["start_time"]))
-            end = max(start + min_segment_seconds, float(seg["end_time"]))
+        for start, end, seg in scheduled:
             duration = end - start
             text = str(seg["narration_text"]).strip()
             wav = self._generate_waveform(text, voice_preset=preset)
@@ -334,6 +366,10 @@ class BarkTTSConverter:
                     fg = float(10.0 ** (foley_gain_db / 20.0))
                     wav = wav + placed * fg
                     foley_segments += 1
+            # Exact slot length prevents librosa stretch drift from bleeding into the
+            # next segment (overlapping Bark lines).
+            slot_samples = max(1, int(round(float(duration) * self.sample_rate)))
+            wav = _match_length(wav, slot_samples)
             start_sample = int(round(start * self.sample_rate))
             end_sample = min(start_sample + wav.shape[0], total_samples)
             if end_sample <= start_sample:
@@ -352,7 +388,7 @@ class BarkTTSConverter:
             "provider": "bark",
             "voice": preset,
             "sample_rate": self.sample_rate,
-            "segments": len(valid),
+            "segments": len(scheduled),
             "duration_seconds": round(total_samples / self.sample_rate, 3),
             "or_ambience": bool(or_ambience),
             "foley_dir": str(foley_lib.root) if foley_lib is not None else None,
