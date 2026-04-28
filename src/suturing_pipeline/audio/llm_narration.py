@@ -198,8 +198,13 @@ def synthesize_narration_line(
     hf_model: str = DEFAULT_HF_NARRATION_MODEL,
     hf_token: Optional[str] = None,
     timeout_sec: float = 120.0,
-) -> str:
-    """Return one narration line from the chosen backend (speech text only)."""
+) -> tuple[str, Optional[str]]:
+    """Return ``(narration_text, llm_user_prompt)``.
+
+    For ``template`` backend the prompt tuple element is ``None`` (no LLM).
+    For ``ollama`` / ``huggingface`` the second value is the exact user message
+    sent to the chat API (from :func:`build_llm_prompt`).
+    """
     b = (backend or "template").strip().lower()
     max_words = max_narration_words_for_duration(duration_seconds)
     user_prompt = build_llm_prompt(
@@ -209,8 +214,11 @@ def synthesize_narration_line(
         duration_seconds=duration_seconds,
     )
     if b == "template":
-        return render_narration_text(
-            gesture_label, cast(Dict[str, float | str], dict(kinematic_summary))
+        return (
+            render_narration_text(
+                gesture_label, cast(Dict[str, float | str], dict(kinematic_summary))
+            ),
+            None,
         )
     if b == "ollama":
         raw = complete_narration_ollama(
@@ -219,7 +227,7 @@ def synthesize_narration_line(
             model=ollama_model,
             timeout_sec=timeout_sec,
         )
-        return _sanitize_narration_line(raw, max_words)
+        return _sanitize_narration_line(raw, max_words), user_prompt
     if b in ("huggingface", "hf"):
         tok = (hf_token or os.environ.get("HF_TOKEN") or "").strip()
         if not tok:
@@ -233,7 +241,7 @@ def synthesize_narration_line(
             token=tok,
             timeout_sec=timeout_sec,
         )
-        return _sanitize_narration_line(raw, max_words)
+        return _sanitize_narration_line(raw, max_words), user_prompt
     raise ValueError(f"Unknown narration backend: {backend!r}")
 
 
@@ -247,9 +255,13 @@ def apply_llm_narration_to_segments(
     hf_token: Optional[str] = None,
     timeout_sec: float = 120.0,
 ) -> list[Dict[str, object]]:
-    """Return a copy of segments with ``narration_text`` replaced when backend != template."""
+    """Return a copy of segments with ``narration_text`` replaced when backend != template.
+
+    For non-template backends each segment also gets ``narration_text_template``
+    (pre-LLM line) and ``llm_user_prompt`` (full user message sent to the API).
+    """
     if (backend or "template").lower() == "template":
-        return list(segments)
+        return [dict(s) for s in segments]
     out: list[Dict[str, object]] = []
     for seg in segments:
         start = float(seg["start_time"])
@@ -258,7 +270,7 @@ def apply_llm_narration_to_segments(
         summary = seg.get("summary")
         if not isinstance(summary, dict):
             raise TypeError("segment missing kinematic summary dict")
-        text = synthesize_narration_line(
+        text, user_prompt = synthesize_narration_line(
             gesture_label=str(seg.get("gesture", "G1")),
             gesture_description=str(
                 seg.get("gesture_description")
@@ -274,7 +286,9 @@ def apply_llm_narration_to_segments(
             timeout_sec=timeout_sec,
         )
         new = dict(seg)
+        new["narration_text_template"] = str(seg.get("narration_text", "")).strip()
         new["narration_text"] = text
+        new["llm_user_prompt"] = user_prompt
         out.append(new)
     return out
 

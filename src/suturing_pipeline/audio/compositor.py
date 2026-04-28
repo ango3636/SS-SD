@@ -16,6 +16,7 @@ moviepy 2.x is required (``from moviepy import VideoFileClip``).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -31,6 +32,8 @@ from suturing_pipeline.audio.narration_templates import (
     GESTURE_DESCRIPTIONS,
     build_expert_speed_stats,
     build_narration_payload,
+    kinematics_segment_to_jsonable,
+    write_narration_transcript,
 )
 from suturing_pipeline.audio.tts import (
     DEFAULT_VOICE_PRESET,
@@ -130,12 +133,14 @@ def _build_segments_from_trial(
                 "end_time": round((e + 1) / source_fps, 4),
                 "start_frame": s,
                 "end_frame": e,
+                "source_frames": list(range(s, e + 1)),
                 "gesture": gesture,
                 "gesture_description": GESTURE_DESCRIPTIONS.get(
                     gesture, f"Performing {gesture}"
                 ),
                 "narration_text": payload["narration_text"],
                 "summary": payload["summary"],
+                "kinematics_values": kinematics_segment_to_jsonable(kin_segment),
             }
         )
     return segments
@@ -205,6 +210,13 @@ def generate_shared_audio_track(
 
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    shared_segments_path = out_dir / f"{trial_name}_shared_narration_segments.json"
+    shared_segments_path.write_text(
+        json.dumps(segments, indent=2), encoding="utf-8"
+    )
+    shared_transcript_path = out_dir / f"{trial_name}_shared_narration_transcript.txt"
+    write_narration_transcript(segments, shared_transcript_path)
+
     wav_path = out_dir / f"{trial_name}_narration.wav"
 
     converter = tts_converter or BarkTTSConverter(

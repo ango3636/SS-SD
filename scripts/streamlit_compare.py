@@ -31,6 +31,52 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 
 from video_quality_metrics import compute_metrics_board  # noqa: E402
 
+
+def _render_narration_downloads(run_dir: Path, key_prefix: str) -> None:
+    """Show download buttons for narration transcript / segment JSON when present."""
+    run_slug = run_dir.name
+    artifacts: List[Tuple[Path, str, str, str]] = []
+    tr = run_dir / "narration_transcript.txt"
+    if tr.exists():
+        artifacts.append(
+            (
+                tr,
+                f"{run_slug}_narration_transcript.txt",
+                "text/plain",
+                "Narration transcript (timed)",
+            )
+        )
+    sj = run_dir / "narration_segments.json"
+    if sj.exists():
+        artifacts.append(
+            (
+                sj,
+                f"{run_slug}_narration_segments.json",
+                "application/json",
+                "Narration segments + kinematics (JSON)",
+            )
+        )
+    for p in sorted(run_dir.glob("*_shared_narration_segments.json")):
+        artifacts.append(
+            (p, p.name, "application/json", f"Shared narration segments ({p.name})")
+        )
+    for p in sorted(run_dir.glob("*_shared_narration_transcript.txt")):
+        artifacts.append(
+            (p, p.name, "text/plain", f"Shared narration transcript ({p.name})")
+        )
+    if not artifacts:
+        return
+    with st.expander("Download narration exports", expanded=False):
+        for i, (path, fname, mime, label) in enumerate(artifacts):
+            st.download_button(
+                label,
+                data=path.read_bytes(),
+                file_name=fname,
+                mime=mime,
+                key=f"{key_prefix}_narr_{path.name}_{i}",
+            )
+
+
 def _resolve_ci(base: Path, *parts: str) -> Path:
     """Join ``parts`` under ``base`` resolving each segment case-insensitively.
 
@@ -773,6 +819,8 @@ def render_previous_run(run_info: Dict[str, object], fps_hint: float) -> None:
                 key=f"dl_side_prev_{run_info['name']}",
             )
 
+    _render_narration_downloads(run_dir, key_prefix=f"prev_{run_info['name']}")
+
 
 @st.cache_data(show_spinner=False)
 def _cached_metrics_board(
@@ -1480,6 +1528,8 @@ def main() -> None:
                     file_name=f"{run_name}_{selected_side.name}",
                     mime="video/mp4",
                 )
+
+            _render_narration_downloads(out_dir, key_prefix=f"gen_{run_name}")
 
 
 if __name__ == "__main__":

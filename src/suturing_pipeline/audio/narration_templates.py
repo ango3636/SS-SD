@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -332,6 +332,26 @@ def build_narration_payload(
         "summary": summary,
         "narration_text": render_narration_text(gesture_label, summary),
     }
+
+
+def kinematics_segment_to_jsonable(kinematic_segment: np.ndarray) -> List[List[float]]:
+    """Serialize a per-frame kinematics block for JSON (rounded floats)."""
+    a = np.asarray(kinematic_segment, dtype=np.float64)
+    return np.round(a, 6).tolist()
+
+
+def write_narration_transcript(
+    segments: Sequence[Mapping[str, object]], path: str | Path
+) -> None:
+    """Write a human-readable timed transcript using final ``narration_text``."""
+    lines: List[str] = []
+    for seg in segments:
+        st = float(seg["start_time"])
+        et = float(seg["end_time"])
+        g = seg.get("gesture", "?")
+        text = str(seg.get("narration_text", "")).strip()
+        lines.append(f"[{st:.3f}s – {et:.3f}s] {g}: {text}")
+    Path(path).write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
 
 def collapse_frame_records(

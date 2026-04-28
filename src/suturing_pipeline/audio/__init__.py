@@ -16,7 +16,9 @@ from .narration_templates import (
     build_narration_payload,
     collapse_frame_records,
     extract_kinematic_summary,
+    kinematics_segment_to_jsonable,
     max_narration_words_for_duration,
+    write_narration_transcript,
 )
 from .tts import (
     BARK_SAMPLE_RATE,
@@ -48,6 +50,8 @@ __all__ = [
     "build_llm_prompt",
     "max_narration_words_for_duration",
     "collapse_frame_records",
+    "kinematics_segment_to_jsonable",
+    "write_narration_transcript",
     "BARK_SAMPLE_RATE",
     "DEFAULT_VOICE_PRESET",
     "BarkTTSConverter",

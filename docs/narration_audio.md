@@ -43,7 +43,9 @@ The **Hugging Face model id** you enter in the UI (or `--hf_narration_model` on 
    - **ollama**: HTTP to `ollama_base_url` `/api/chat`.
    - **huggingface** / **hf**: HTTP `POST` to `https://router.huggingface.co/v1/chat/completions` with `Authorization: Bearer <token>`. Requires **`HF_TOKEN`** (environment or `--hf_token`). The response is sanitized (first line, word cap) so TTS stays short.
 
-5. **Artifacts** — `narration_segments.json` is written under the run output directory (full segment dicts including final `narration_text`).
+5. **Artifacts** — Under the run output directory:
+   - `narration_segments.json` — full segment dicts: final `narration_text`, `summary`, `gesture` / `gesture_description`, `source_frames`, per-frame **`kinematics_values`** (the same rows used to build the summary), and when `--narration_backend` is not `template`: **`llm_user_prompt`** (exact user message to the chat API) and **`narration_text_template`** (pre-LLM template line).
+   - `narration_transcript.txt` — human-readable timed lines (`[start – end] gesture: text`) using the final spoken text.
 
 6. **Bark track** — `synthesize_narration_audio` runs Bark per segment, **time-stretches / trims** each clip to the segment duration, places clips on a single timeline (same sample rate as Bark), optionally mixes **OR ambience** if enabled, then writes the narration audio file used for muxing.
 
@@ -54,6 +56,8 @@ The **Hugging Face model id** you enter in the UI (or `--hf_narration_model` on 
 ## Streamlit vs CLI
 
 **Streamlit** toggles mirror the CLI: enabling narration adds `--enable_narration`, `--tts_provider`, `--tts_voice`, optional `--narrate_sidebyside`, `--narration_default_outputs`, and when the text backend is Hugging Face, `--hf_narration_model` plus **`HF_TOKEN` in the child process environment** if you pasted a token (the logged shell command intentionally does not echo the token).
+
+After a run (or when loading a previous run), use **Download narration exports** for `narration_transcript.txt` and `narration_segments.json`. The `--compare` path also writes `<trial_name>_shared_narration_segments.json` and `<trial_name>_shared_narration_transcript.txt` in the same folder; those appear in the same expander when present.
 
 For a full flag list and defaults, run:
 

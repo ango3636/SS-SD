@@ -64,6 +64,8 @@ from suturing_pipeline.audio.narration_templates import (
     build_expert_speed_stats,
     build_narration_payload,
     collapse_frame_records,
+    kinematics_segment_to_jsonable,
+    write_narration_transcript,
 )
 from suturing_pipeline.audio.tts import (
     DEFAULT_VOICE_PRESET,
@@ -764,6 +766,7 @@ def main() -> None:
                     "summary": payload["summary"],
                     "narration_text": payload["narration_text"],
                     "gesture_description": payload["gesture_description"],
+                    "kinematics_values": kinematics_segment_to_jsonable(kin_segment),
                 }
             )
         if args.narration_backend != "template":
@@ -786,9 +789,14 @@ def main() -> None:
         )
         print(f"  wrote {segments_path}")
 
+        transcript_path = out_dir / "narration_transcript.txt"
+        write_narration_transcript(narration_segments, transcript_path)
+        print(f"  wrote {transcript_path}")
+
         narration_info.update(
             {
                 "segments_path": str(segments_path),
+                "transcript_path": str(transcript_path),
                 "segment_count": len(narration_segments),
                 "tts_provider": args.tts_provider,
                 "tts_voice": args.tts_voice,
@@ -924,6 +932,8 @@ def main() -> None:
             )
             print(f"[compare] wrote {comparison_path}")
 
+            shared_seg_json = out_dir / f"{trial_name}_shared_narration_segments.json"
+            shared_tr_txt = out_dir / f"{trial_name}_shared_narration_transcript.txt"
             compare_info.update(
                 {
                     "voice_preset": voice_preset,
@@ -936,6 +946,8 @@ def main() -> None:
                     "foley_dir": args.foley_dir,
                     "foley_gain_db": float(args.foley_gain_db),
                     "foley_align": str(args.foley_align),
+                    "shared_narration_segments_json": str(shared_seg_json),
+                    "shared_narration_transcript_txt": str(shared_tr_txt),
                 }
             )
         except Exception as e:
