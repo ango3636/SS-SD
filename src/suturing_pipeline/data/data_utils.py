@@ -66,8 +66,9 @@ def parse_kinematics(kinematics_path: str | Path) -> np.ndarray:
     """Load a JIGSAWS kinematics file as a NumPy array.
 
     The file is headerless, whitespace-delimited, with 76 columns per row
-    (positions, velocities, gripper angles for both patient- and
-    master-side manipulators).
+    (four 19-column tool blocks: master left/right, slave left/right — each
+    with tip xyz, rotation ``R``, translational velocity, rotational velocity,
+    and gripper angle). See :mod:`~suturing_pipeline.data.jigsaws_kinematics_layout`.
 
     Returns an array of shape ``(num_frames, 76)``.
     """

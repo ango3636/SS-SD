@@ -9,9 +9,10 @@ from suturing_pipeline.audio.narration_templates import (
 
 def _segment_with_speed(speed: float, n: int = 12) -> np.ndarray:
     seg = np.zeros((n, 76), dtype=np.float32)
-    seg[:, 0] = speed
-    seg[:, 38] = speed
-    seg[:, 37] = 10.0
+    # Master left / master right translational velocity (JIGSAWS 1-based 13–15 / 32–34)
+    seg[:, 12] = speed
+    seg[:, 31] = speed
+    seg[:, 56] = 10.0
     seg[:, 75] = 12.0
     return seg
 

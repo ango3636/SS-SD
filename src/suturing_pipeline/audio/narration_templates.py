@@ -11,6 +11,12 @@ from suturing_pipeline.data.data_utils import (
     parse_kinematics,
     parse_transcription,
 )
+from suturing_pipeline.data.jigsaws_kinematics_layout import (
+    MASTER_LEFT_TRANS_VEL,
+    MASTER_RIGHT_TRANS_VEL,
+    SLAVE_LEFT_GRIPPER,
+    SLAVE_RIGHT_GRIPPER,
+)
 
 GESTURE_DESCRIPTIONS: Dict[str, str] = {
     "G1": "Reaching for needle with right hand",
@@ -138,8 +144,9 @@ def _resolve_ci(path: Path) -> Path:
 
 
 def _speed_per_row(kinematic_segment: np.ndarray) -> np.ndarray:
-    left = np.asarray(kinematic_segment[:, 0:3], dtype=np.float64)
-    right = np.asarray(kinematic_segment[:, 38:41], dtype=np.float64)
+    """Per-frame speed from master-left and master-right translational velocity."""
+    left = np.asarray(kinematic_segment[:, MASTER_LEFT_TRANS_VEL], dtype=np.float64)
+    right = np.asarray(kinematic_segment[:, MASTER_RIGHT_TRANS_VEL], dtype=np.float64)
     left_mag = np.linalg.norm(left, axis=1)
     right_mag = np.linalg.norm(right, axis=1)
     return 0.5 * (left_mag + right_mag)
@@ -193,7 +200,11 @@ def extract_kinematic_summary(
     expert_speed_stats: Optional[Dict[str, SpeedStats | Dict[str, float]]] = None,
     min_count_for_empirical: int = 8,
 ) -> Dict[str, float | str]:
-    """Summarize a gesture segment from JIGSAWS kinematics (N, 76)."""
+    """Summarize a gesture segment from JIGSAWS kinematics (N, 76).
+
+    Uses README column layout: master left/right translational velocity for
+    motion speed; slave left/right gripper angles for on-screen instruments.
+    """
     seg = np.asarray(kinematic_segment, dtype=np.float64)
     if seg.ndim != 2 or seg.shape[1] < 76:
         raise ValueError(
@@ -212,10 +223,10 @@ def extract_kinematic_summary(
             "segment_length_frames": 0,
         }
 
-    avg_velocity_left = _safe_mean(seg[:, 0:3])
-    avg_velocity_right = _safe_mean(seg[:, 38:41])
-    avg_gripper_left = _safe_mean(seg[:, 37])
-    avg_gripper_right = _safe_mean(seg[:, 75])
+    avg_velocity_left = _safe_mean(seg[:, MASTER_LEFT_TRANS_VEL])
+    avg_velocity_right = _safe_mean(seg[:, MASTER_RIGHT_TRANS_VEL])
+    avg_gripper_left = _safe_mean(seg[:, SLAVE_LEFT_GRIPPER])
+    avg_gripper_right = _safe_mean(seg[:, SLAVE_RIGHT_GRIPPER])
     speed_rows = _speed_per_row(seg)
     speed_var = float(np.nanvar(speed_rows)) if speed_rows.size else 0.0
     motion_smoothness = float(1.0 / (speed_var + _EPS))
