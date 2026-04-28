@@ -15,7 +15,8 @@ checkpoints/
 outputs/
 logs/
 data/gdrive_cache/
-data/
+# Only ignore the repo-root dataset folder, not Python packages under src/*/data/
+/data/
 pipeline_exploratory/
 
 # Model/binary artifacts
