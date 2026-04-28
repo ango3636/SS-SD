@@ -10,6 +10,7 @@ diffusers
 transformers
 accelerate
 peft
+torchao>=0.16.0
 safetensors
 scikit-learn
 Pillow

@@ -60,7 +60,11 @@ def _parse_args() -> argparse.Namespace:
         "If omitted, the first available fold is used.",
     )
     p.add_argument("--itr", type=int, default=1)
-    p.add_argument("--expert_only", action="store_true")
+    p.add_argument(
+        "--expert_only",
+        action="store_true",
+        help="Keep only trials with self-reported expert (meta file col 2, 1-based N/I/E).",
+    )
     p.add_argument("--image_size", type=int, default=256)
     p.add_argument("--capture", type=int, default=1, choices=[1, 2])
     p.add_argument(

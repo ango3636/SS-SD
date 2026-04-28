@@ -107,7 +107,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--expert_only",
         action="store_true",
-        help="Restrict to expert trials (metafile skill == Expert).",
+        help=(
+            "Restrict to expert trials: meta file column 2 (1-based), "
+            "self-reported E — not the GRS column. See jigsaws_metafile_layout."
+        ),
     )
     p.add_argument(
         "--dataset_split",

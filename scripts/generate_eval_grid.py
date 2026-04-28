@@ -59,8 +59,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--expert_only",
         action="store_true",
-        help="Restrict test split to expert trials.  By default the test "
-        "split includes all skill levels present in the fold.",
+        help="Restrict test split to self-reported expert trials (meta file "
+        "column 2, 1-based; not GRS). By default the test split includes all "
+        "skill levels present in the fold.",
     )
 
     # Sampling

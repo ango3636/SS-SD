@@ -138,7 +138,9 @@ class JIGSAWSDataset(Dataset):
     itr:
         Cross-validation iteration number (default ``1``).
     expert_only:
-        If *True*, keep only trials whose metafile skill level is *Expert*.
+        If *True*, keep only trials whose **self-reported** skill in the meta
+        file (column 2, 1-based; see ``jigsaws_metafile_layout``) is *Expert*
+        (``E``), not the GRS column.
     modality:
         ``"video"``, ``"kinematics"``, or ``"both"`` (default ``"both"``).
     image_size:
@@ -211,7 +213,10 @@ class JIGSAWSDataset(Dataset):
         task_dir = _resolve_ci(self.data_root / _TASK_NAME)
 
         # JIGSAWS metafiles are named "meta_file_{TaskName}.txt", not
-        # "metafile.txt".  Search for the actual file.
+        # "metafile.txt".  Search for the actual file.  Column layout (1-based:
+        # filename, self N/I/E, GRS, six GRS sub-scores) is documented in
+        # ``suturing_pipeline.data.jigsaws_metafile_layout``; *expert_only* uses
+        # column 2 (self-reported), not the GRS column.
         metafile = _resolve_ci(task_dir / f"meta_file_{prefix}.txt")
         if not metafile.exists():
             metafile = _resolve_ci(task_dir / "metafile.txt")

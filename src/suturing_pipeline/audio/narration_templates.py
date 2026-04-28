@@ -423,6 +423,8 @@ def build_expert_speed_stats(
     data_root = Path(data_root)
     task_dir = _resolve_ci(data_root / task)
     task_prefix = "Suturing" if task.lower() == "suturing" else task.capitalize()
+    # ``meta_file_*.txt``: col 1 trial, col 2 self N/I/E, col 3 GRS, cols 4–9 GRS
+    # elements (see jigsaws_metafile_layout). Expert filter = col 2 only.
     metafile = _resolve_ci(task_dir / f"meta_file_{task_prefix}.txt")
     if not metafile.exists():
         return {}

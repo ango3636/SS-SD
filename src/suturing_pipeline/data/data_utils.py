@@ -11,33 +11,49 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 
+from suturing_pipeline.data.jigsaws_metafile_layout import (
+    GRS_MODIFIED_ORDER,
+    JigsawsMetafileRow,
+    read_metafile_rows,
+)
+
+_MAP_SELF_SKILL = {"N": "Novice", "I": "Intermediate", "E": "Expert"}
+
+
+def _self_skill_to_label(raw: str) -> str:
+    """Map column-2 (1-based) self-reported code to a normalised label."""
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    key = s[:1].upper()
+    if key in _MAP_SELF_SKILL:
+        return _MAP_SELF_SKILL[key]
+    return s
+
 
 def parse_metafile(metafile_path: str | Path) -> Dict[str, str]:
-    """Parse a JIGSAWS meta-file into a trial-name -> skill-level map.
+    """Parse a JIGSAWS meta file into a trial name → self-reported skill *label* map.
 
-    The file is tab-delimited with the actual layout::
+    The meta file (e.g. ``meta_file_Suturing.txt``) is tab- or
+    whitespace-delimited. The official JIGSAWS **1-based** column layout is
+    described in :mod:`~suturing_pipeline.data.jigsaws_metafile_layout` and
+    in :class:`JigsawsMetafileRow` — in short:
 
-        Knot_Tying_B001\\tN\\t13\\t2\\t2\\t...
+    * **1** — filename / trial name
+    * **2** — self-reported skill: ``N``/``I``/``E`` (novice / intermediate / expert)
+    * **3** — GRS (global rating scale) skill
+    * **4–9** — six modified GRS element scores, in
+      :data:`~suturing_pipeline.data.jigsaws_metafile_layout.GRS_MODIFIED_ORDER`
 
-    Column 0 is the trial name and column 1 is the single-letter skill
-    code (``N``/``I``/``E``).  This function normalises to the full word.
+    This function only uses **columns 1 and 2** to build
+    ``{ trial_name: "Novice" | "Intermediate" | "Expert" }`` from the
+    **self-reported** column. It does **not** use column 3 (GRS) for this map.
+
+    For full rows including GRS fields, use :func:`read_metafile_rows`.
     """
     skill_map: Dict[str, str] = {}
-    _abbrev = {"N": "Novice", "I": "Intermediate", "E": "Expert"}
-
-    for line in Path(metafile_path).read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        # Try tab-split first (actual JIGSAWS format), fall back to whitespace
-        parts = line.split("\t") if "\t" in line else line.split()
-        parts = [p.strip() for p in parts if p.strip()]
-        if len(parts) < 2:
-            continue
-        trial_name = parts[0]
-        raw_skill = parts[1]
-        skill_map[trial_name] = _abbrev.get(raw_skill, raw_skill)
-
+    for row in read_metafile_rows(metafile_path):
+        skill_map[row.trial_name] = _self_skill_to_label(row.skill_self_proclaimed)
     return skill_map
 
 
@@ -129,9 +145,15 @@ def get_frame_label_map(
 
 
 def filter_expert_trials(metafile_path: str | Path) -> List[str]:
-    """Return trial names whose skill level is *Expert*.
+    """Return trial names where **self-reported** skill (meta file **column 2**,
+    1-based) is *Expert*.
 
-    Handles both single-letter (``E``) and full-word (``Expert``) encodings.
+    Uses the same N/I/E field as :func:`parse_metafile`, **not** column 3
+    (GRS). Expert is detected when the normalised label from column 2 starts
+    with ``"E"`` (see :func:`parse_metafile`).
+
+    See :mod:`suturing_pipeline.data.jigsaws_metafile_layout` for the full
+    column specification.
     """
     skill_map = parse_metafile(metafile_path)
     return [

@@ -243,7 +243,12 @@ Each Suturing trial must provide:
 - JIGSAWS kinematics file sampled at 30 Hz
 - transcription / gesture timing file
 - the standard `Experimental_setup/.../onetrialout/` split files
-- `meta_file_Suturing.txt` (skill metadata, used by `--expert_only`)
+- `meta_file_Suturing.txt` — tab- or space-delimited columns (1-based):
+  (1) trial / filename, (2) self-reported skill `N`/`I`/`E`, (3) GRS skill,
+  (4–9) six modified GRS element scores (tissue, suture/needle, time & motion,
+  flow, overall, quality of final product). The pipeline and `--expert_only` use
+  **column 2** (self-reported) for expert filtering, not column 3. Full
+  reference: `src/suturing_pipeline/data/jigsaws_metafile_layout.py`.
 
 `JIGSAWSDataset` lazily opens video via OpenCV, normalises kinematics
 with a `StandardScaler` fitted at init, and serialises scaler +

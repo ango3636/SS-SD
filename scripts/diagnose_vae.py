@@ -67,7 +67,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--balance", default="balanced")
     p.add_argument("--held_out", type=int, default=None)
     p.add_argument("--itr", type=int, default=1)
-    p.add_argument("--expert_only", action="store_true")
+    p.add_argument(
+        "--expert_only",
+        action="store_true",
+        help="Self-reported expert only (meta file column 2). See jigsaws_metafile_layout.",
+    )
     p.add_argument("--capture", type=int, default=1, choices=[1, 2])
     p.add_argument("--frame_stride", type=int, default=60)
     p.add_argument("--seed", type=int, default=0)

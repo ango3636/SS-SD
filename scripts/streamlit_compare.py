@@ -25,9 +25,14 @@ import cv2
 import streamlit as st
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-# Make sibling modules importable when launched via `streamlit run`.
+# ``suturing_pipeline`` (src) and script-local helpers when launched via `streamlit run`.
+_SRC = REPO_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from suturing_pipeline.data.data_utils import parse_metafile  # noqa: E402
 
 from video_quality_metrics import compute_metrics_board  # noqa: E402
 
@@ -111,6 +116,8 @@ def _resolve_ci(base: Path, *parts: str) -> Path:
 
 DATA_ROOT = REPO_ROOT / "data" / "gdrive_cache"
 VIDEO_DIR = _resolve_ci(DATA_ROOT, "suturing", "video")
+# JIGSAWS meta: col1 trial, col2 self N/I/E, col3 GRS, cols4–9 GRS sub-scores
+# (suturing_pipeline.data.jigsaws_metafile_layout). UI skill badge uses col 2.
 META_FILE = _resolve_ci(DATA_ROOT, "suturing", "meta_file_Suturing.txt")
 EXP_SETUP_ROOT = _resolve_ci(
     DATA_ROOT,
@@ -165,13 +172,16 @@ def scan_trials() -> List[Dict[str, object]]:
 
 
 def _load_skill_map() -> Dict[str, str]:
+    """Map ``Suturing_*`` trial → single-letter N/I/E from meta file **column 2**."""
     if not META_FILE.exists():
         return {}
+    label_to_letter = {"Novice": "N", "Intermediate": "I", "Expert": "E"}
+    full = parse_metafile(META_FILE)
     out: Dict[str, str] = {}
-    for line in META_FILE.read_text().splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[0].startswith("Suturing_"):
-            out[parts[0]] = parts[1].strip().upper()[:1]
+    for name, label in full.items():
+        if not str(name).startswith("Suturing_"):
+            continue
+        out[str(name)] = label_to_letter.get(label, (label or "?")[:1].upper())
     return out
 
 
