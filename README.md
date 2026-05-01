@@ -18,6 +18,47 @@ gesture id (int)     ─┘                                          ▲
                                                          noisy latent + timestep
 ```
 
+**Terminology.** *Diffusion models* are a broad family of generative models.
+**Stable Diffusion** is a *latent* diffusion system: a frozen **VAE** maps
+images to a compact latent space; a **U-Net** predicts noise (or the
+velocity) in that space; a **scheduler** (e.g. DDPM / DDIM) defines the
+corruption process; and **conditioning** (originally CLIP text embeddings)
+feeds **cross-attention** inside the U-Net. This project keeps that SD
+backbone but replaces text conditioning with **kinematic-guided**
+cross-attention — i.e. a **kinematic-guided latent diffusion** model.
+
+**Inference** mirrors standard latent diffusion sampling: Gaussian noise in
+VAE latent space → iterative denoising with the U-Net conditioned on
+embeddings from `KinematicEncoder` → VAE decode to RGB.
+
+### JIGSAWS kinematic layout (76 columns per frame)
+
+Each row of the kinematics file matches one video frame (30 Hz). Values are
+documented in code as [`jigsaws_kinematics_layout.py`](src/suturing_pipeline/data/jigsaws_kinematics_layout.py).
+Layout: four **tool blocks** (master left/right, slave left/right). Each
+block has 19 fields: tip **x,y,z** (3), rotation matrix **R** (9),
+translational velocity (3), rotational velocity (3), **gripper** angle (1).
+
+| Block (1-based column range) | Contents |
+|------------------------------|----------|
+| 1–19 | Master left |
+| 20–38 | Master right |
+| 39–57 | Slave left |
+| 58–76 | Slave right |
+
+Optional training flag **`--append_motion_features`** concatenates four
+**derived** scalars per frame (velocity magnitude, smoothed velocity,
+acceleration, jerk from master-left translational velocity); see
+[`motion_columns.py`](src/suturing_pipeline/kinematics/motion_columns.py).
+
+### Non-kinematic conditioning (optional)
+
+**`--num_semantic_tokens`** adds learnable soft-prompt tokens (concatenated in
+cross-attention). **`--clip_scene_prompt`** injects a single token derived
+from the frozen SD **CLIP text encoder** (mean-pooled hidden states + learned
+projection) so the model can pick up needle/thread/scene semantics alongside
+kinematics.
+
 Only the JIGSAWS `Suturing` task is supported. The other JIGSAWS tasks
 do not ship aligned kinematics usable by this pipeline.
 
@@ -40,6 +81,7 @@ below.
 | Real-vs-generated video  | `scripts/generate_eval_video.py` | Walks a contiguous range of frames from one held-out trial and writes `real.mp4`, `generated.mp4`, `sidebyside.mp4`. |
 | Metrics on a grid image  | `scripts/metrics_on_grid.py`     | PSNR / SSIM / histogram / edge-IoU on the exported grid, including cross-pair baselines to check the model is tracking conditioning rather than scene average. |
 | Metrics on a clip pair   | `scripts/video_quality_metrics.py` | SSIM + Farneback optical-flow motion profile, flags flicker/jump windows with plain-language reasons. |
+| Fréchet Inception Distance | `scripts/compute_fid.py`           | Distribution distance between two folders of PNGs (requires `pytorch-fid`). Use aligned real vs generated image sets from the same protocol. |
 | Interactive comparison   | `scripts/streamlit_compare.py`   | Streamlit UI: pick a checkpoint + trial + clip length, shells out to `generate_eval_video.py`, embeds the resulting MP4s and the metrics board. |
 
 Optional **gesture-aligned narration** (template, Ollama, or Hugging Face **text** → **Bark** TTS → ffmpeg mux) is explained for users in [docs/audio_generation.md](docs/audio_generation.md); pipeline and file layout details are in [docs/narration_audio.md](docs/narration_audio.md).
@@ -88,11 +130,11 @@ src/suturing_pipeline/
     loader.py                 # Google Drive OAuth + cache materialisation
     alignment.py              # modality alignment helpers
   synthesis/
-    kinematic_encoder.py      # 76-dim kin + gesture -> [B, 77, 768]
+    kinematic_encoder.py      # kin + gesture -> cross-attn (optional sem + CLIP token)
     sd_sampler.py             # load ckpt once, call .sample() per frame
     controlnet_pipeline.py    # (legacy scaffold)
   detection/                  # YOLO labeling + training + export (secondary)
-  kinematics/                 # feature engineering (secondary)
+  kinematics/                 # feature engineering; motion_columns (append to kin)
   sequence/                   # temporal model components (secondary)
   dashboard/                  # original comparison dashboard (secondary)
 scripts/                      # CLI entry points for every stage above
@@ -150,6 +192,11 @@ python scripts/train_sd.py \
   --epochs 50 \
   --save_every 500 \
   --save_dir ./checkpoints/suturing_expert_lora
+
+# Optional (professor feedback): richer motion input + semantic conditioning
+# python scripts/train_sd.py ... --append_motion_features \\
+#   --num_semantic_tokens 4 \\
+#   --clip_scene_prompt "robotic laparoscopic suturing needle suture thread tissue"
 ```
 
 Each saved checkpoint bundles LoRA state, `KinematicEncoder` weights,
@@ -169,6 +216,9 @@ python scripts/generate_eval_video.py \
   --checkpoint checkpoints/suturing_expert_lora/step_1480.pt \
   --data_root  ./data/gdrive_cache \
   --num_frames 60 --frame_step 6 --num_inference_steps 20
+
+# Optional: FID between two folders of PNGs (e.g. cropped reals vs gens)
+# python scripts/compute_fid.py --path1 ./real_pngs --path2 ./gen_pngs --device cuda
 ```
 
 Or launch the interactive comparison app:

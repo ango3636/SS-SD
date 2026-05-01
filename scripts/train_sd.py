@@ -1,9 +1,11 @@
 """Train a Stable Diffusion model conditioned on JIGSAWS Suturing kinematics.
 
-The CLIP text encoder is replaced entirely by a learned
+The CLIP text encoder is replaced by a learned
 :class:`~suturing_pipeline.synthesis.kinematic_encoder.KinematicEncoder`
-that projects 76-dim kinematic vectors + gesture labels into the U-Net's
-cross-attention space.
+that projects kinematic vectors + gesture labels into the U-Net's
+cross-attention space.  Optional **learnable semantic tokens** and a
+**CLIP-derived scene token** (from ``--clip_scene_prompt``) extend conditioning
+for non-kinematic scene content.
 
 Only the JIGSAWS ``suturing`` task is supported — kinematics for the other
 JIGSAWS tasks are not available in this project.
@@ -42,7 +44,10 @@ from tqdm import tqdm
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from suturing_pipeline.data.jigsaws_dataset import JIGSAWSDataset
-from suturing_pipeline.synthesis.kinematic_encoder import KinematicEncoder
+from suturing_pipeline.synthesis.kinematic_encoder import (
+    KinematicEncoder,
+    encode_clip_scene_embedding,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -103,6 +108,26 @@ def _parse_args() -> argparse.Namespace:
         help="Override device (e.g. 'cuda', 'mps', 'cpu').",
     )
     p.add_argument("--num_workers", type=int, default=2)
+    p.add_argument(
+        "--append_motion_features",
+        action="store_true",
+        help="Append per-frame velocity / acceleration / jerk (4 values) to each "
+        "raw 76-dim kinematics row (80-dim input).",
+    )
+    p.add_argument(
+        "--num_semantic_tokens",
+        type=int,
+        default=0,
+        help="Learnable soft-prompt tokens concatenated to cross-attention for "
+        "non-kinematic scene context (0 = disabled).",
+    )
+    p.add_argument(
+        "--clip_scene_prompt",
+        default=None,
+        help="Optional. Frozen CLIP text-encoder embedding of this string; one "
+        "projected token is concatenated after kinematic + semantic tokens. "
+        "Example: 'robotic laparoscopic suturing with needle and suture thread'.",
+    )
     return p.parse_args()
 
 
@@ -226,6 +251,7 @@ def main() -> None:
         image_size=args.image_size,
         capture=args.capture,
         frame_stride=args.frame_stride,
+        append_motion_features=args.append_motion_features,
     )
     loader = DataLoader(
         dataset,
@@ -244,11 +270,23 @@ def main() -> None:
     }
 
     # -- kinematic encoder -----------------------------------------------------
+    kin_dim = dataset._kinematics[0].shape[1] if dataset._kinematics else 76
+    clip_feat = None
+    if args.clip_scene_prompt:
+        print("Encoding --clip_scene_prompt with CLIP text encoder (CPU) ...")
+        clip_feat = encode_clip_scene_embedding(
+            args.model_id,
+            args.clip_scene_prompt,
+            device=torch.device("cpu"),
+        )
+
     encoder = KinematicEncoder(
-        kin_dim=dataset._kinematics[0].shape[1] if dataset._kinematics else 76,
+        kin_dim=kin_dim,
         num_gestures=max(dataset.num_gestures, 1),
         seq_len=77,
         embed_dim=cross_attn_dim,
+        num_semantic_tokens=args.num_semantic_tokens,
+        clip_scene_feature=clip_feat,
     ).to(device)
 
     # -- optimizer (encoder + unfrozen U-Net params) ---------------------------

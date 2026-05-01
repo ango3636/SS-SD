@@ -1,6 +1,11 @@
+import numpy as np
 import pandas as pd
 
 from suturing_pipeline.kinematics.features import compute_kinematic_features
+from suturing_pipeline.kinematics.motion_columns import (
+    MOTION_FEATURE_DIM,
+    append_motion_columns,
+)
 
 
 def test_compute_kinematic_features_columns():
@@ -16,3 +21,9 @@ def test_compute_kinematic_features_columns():
     )
     assert len(out) == len(df)
     assert {"velocity", "acceleration", "jerk", "abs_jerk"}.issubset(out.columns)
+
+
+def test_append_motion_columns_shape():
+    kin = np.zeros((10, 76), dtype=np.float64)
+    aug = append_motion_columns(kin)
+    assert aug.shape == (10, 76 + MOTION_FEATURE_DIM)

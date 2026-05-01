@@ -110,8 +110,10 @@ def _edge_iou(a: np.ndarray, b: np.ndarray, thresh: float = 0.15) -> float:
     return float(inter / union) if union > 0 else 0.0
 
 
-def main() -> None:
-    img = np.asarray(Image.open(GRID_PATH).convert("RGB"))
+def main(grid_path: Path | None = None) -> None:
+    path = grid_path if grid_path is not None else GRID_PATH
+    print(f"Reading grid: {path}")
+    img = np.asarray(Image.open(path).convert("RGB"))
     rows = _find_tile_rows(img)
     print(f"Detected {len(rows)} row bands")
 
@@ -222,7 +224,7 @@ def main() -> None:
           f"| off-diagonal = {off_ssim:.4f}    "
           f"| delta = {diag_ssim - off_ssim:+.4f}")
 
-    out_path = GRID_PATH.parent / "metrics.json"
+    out_path = path.parent / "metrics.json"
     out_path.write_text(
         json.dumps({
             "per_sample": records,
@@ -243,4 +245,13 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    _p = argparse.ArgumentParser(description="Metrics on eval_grid PNG.")
+    _p.add_argument(
+        "--grid_path",
+        default=str(GRID_PATH),
+        help="Path to eval_grid.png (default: built-in smoke path).",
+    )
+    _a = _p.parse_args()
+    main(grid_path=Path(_a.grid_path))

@@ -42,7 +42,10 @@ import torch.nn.functional as F
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from suturing_pipeline.data.jigsaws_dataset import JIGSAWSDataset
-from suturing_pipeline.synthesis.kinematic_encoder import KinematicEncoder
+from suturing_pipeline.synthesis.kinematic_encoder import (
+    KinematicEncoder,
+    encode_clip_scene_embedding,
+)
 from suturing_pipeline.synthesis.sd_sampler import resolve_device
 
 
@@ -104,6 +107,13 @@ def _parse_args() -> argparse.Namespace:
 
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default=None)
+    p.add_argument(
+        "--append_motion_features",
+        action="store_true",
+        help="Match train_sd.py: append velocity/accel/jerk scalars to kin.",
+    )
+    p.add_argument("--num_semantic_tokens", type=int, default=0)
+    p.add_argument("--clip_scene_prompt", default=None)
     return p.parse_args()
 
 
@@ -244,6 +254,7 @@ def main() -> None:
         image_size=args.image_size,
         capture=args.capture,
         frame_stride=args.frame_stride,
+        append_motion_features=args.append_motion_features,
     )
     print(
         f"  trials={len(dataset._trial_names)} index_size={len(dataset._index)}"
@@ -333,11 +344,22 @@ def main() -> None:
 
     cross_attn_dim = unet.config.cross_attention_dim if hasattr(unet, "config") else 768
 
+    kin_dim = dataset._kinematics[trial_idx].shape[1]
+    clip_feat = None
+    if args.clip_scene_prompt:
+        clip_feat = encode_clip_scene_embedding(
+            args.model_id,
+            args.clip_scene_prompt,
+            device=torch.device("cpu"),
+        )
+
     encoder = KinematicEncoder(
-        kin_dim=76,
+        kin_dim=kin_dim,
         num_gestures=max(dataset.num_gestures, 1),
         seq_len=77,
         embed_dim=cross_attn_dim,
+        num_semantic_tokens=args.num_semantic_tokens,
+        clip_scene_feature=clip_feat,
     ).to(device)
     encoder.train()
 

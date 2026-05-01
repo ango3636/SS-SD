@@ -470,6 +470,7 @@ def main() -> None:
     held_out = args.held_out if args.held_out is not None else saved.get("held_out")
     itr = args.itr if args.itr is not None else saved.get("itr", 1)
     capture = args.capture if args.capture is not None else saved.get("capture", 1)
+    append_motion = bool(saved.get("append_motion_features", False))
 
     ckpt_gesture_to_int: Dict[str, int] = ckpt.get("gesture_to_int", {}) or {}
     if not ckpt_gesture_to_int:
@@ -528,6 +529,7 @@ def main() -> None:
             image_size=args.image_size,
             capture=capture,
             frame_stride=1,
+            append_motion_features=append_motion,
         )
     except RuntimeError as e:
         raise SystemExit(

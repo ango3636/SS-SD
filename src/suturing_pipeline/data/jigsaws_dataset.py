@@ -28,6 +28,7 @@ from .data_utils import (
     parse_kinematics,
     parse_transcription,
 )
+from suturing_pipeline.kinematics.motion_columns import append_motion_columns
 
 # Only the suturing task is supported.  JIGSAWS directory names use
 # lowercase (``suturing/``) while filenames use CamelCase (``Suturing_B001``);
@@ -151,6 +152,10 @@ class JIGSAWSDataset(Dataset):
         Sample every *N*-th frame instead of every frame (default ``1``).
         Set to e.g. ``30`` to sample ~1 frame/second at 30 fps, which
         dramatically reduces dataset size for faster iteration on CPU.
+    append_motion_features:
+        If *True*, append per-frame velocity / smoothed velocity /
+        acceleration / jerk (four scalars) after each raw 76-dim row — see
+        :mod:`~suturing_pipeline.kinematics.motion_columns`.
     """
 
     def __init__(
@@ -166,6 +171,7 @@ class JIGSAWSDataset(Dataset):
         image_size: int = 256,
         capture: int = 1,
         frame_stride: int = 1,
+        append_motion_features: bool = False,
     ) -> None:
         super().__init__()
         self.data_root = Path(data_root)
@@ -174,6 +180,7 @@ class JIGSAWSDataset(Dataset):
         self.modality = modality
         self.image_size = image_size
         self.capture = capture
+        self.append_motion_features = append_motion_features
 
         prefix = _TASK_FILENAME_PREFIX
 
@@ -268,6 +275,8 @@ class JIGSAWSDataset(Dataset):
                 continue
 
             kin = parse_kinematics(kin_path)
+            if self.append_motion_features:
+                kin = append_motion_columns(kin)
 
             if trans_path.exists():
                 transcription = parse_transcription(trans_path)
