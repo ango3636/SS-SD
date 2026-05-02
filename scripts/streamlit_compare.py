@@ -521,6 +521,7 @@ def run_generation(
     image_size: int,
     anchor_mode: str,
     init_strength: float,
+    anchor_reset_every: int,
     held_out: Optional[int],
     run_name: str,
     log_container,
@@ -569,6 +570,8 @@ def run_generation(
         "--anchor_mode", anchor_mode,
         "--init_strength", f"{init_strength:g}",
     ]
+    if int(anchor_reset_every) > 0:
+        cmd.extend(["--anchor_reset_every", str(int(anchor_reset_every))])
     if held_out is not None:
         cmd.extend(["--held_out", str(held_out)])
     if enable_narration:
@@ -815,6 +818,8 @@ def render_previous_run(run_info: Dict[str, object], fps_hint: float) -> None:
         except Exception as e:  # pragma: no cover - defensive UI path
             st.info(f"Metrics board unavailable: {e}")
 
+    render_narration_metrics_board(meta if isinstance(meta, dict) else None)
+
     if meta:
         with st.expander("Run metadata", expanded=False):
             st.json(meta)
@@ -1044,6 +1049,93 @@ def render_metrics_board(
     )
 
 
+def render_narration_metrics_board(meta: Optional[dict]) -> None:
+    """Show narration/TTS summary when ``metadata.json`` includes narration."""
+    if not meta or not isinstance(meta, dict):
+        return
+    narr = meta.get("narration")
+    if not isinstance(narr, dict) or not narr.get("enabled"):
+        return
+
+    st.divider()
+    st.subheader("Narration / voice metrics")
+    st.caption(
+        "Summarises the Bark narration track for this run (from metadata). "
+        "Video scores above compare pixels and motion only."
+    )
+
+    err = narr.get("error")
+    if err:
+        st.warning(f"Narration pipeline reported an error: {err}")
+
+    tts: Dict = narr.get("tts") if isinstance(narr.get("tts"), dict) else {}
+
+    def _intify(x: object, default: int = 0) -> int:
+        try:
+            return int(x)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return default
+
+    segs = tts.get("segments")
+    if segs is None:
+        segs = narr.get("segment_count")
+    seg_display = str(_intify(segs)) if segs is not None else "—"
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric(
+        "Narration segments",
+        seg_display,
+        help="Gesture-aligned speech segments in the mixed track.",
+    )
+    dur = tts.get("duration_seconds")
+    k2.metric(
+        "Audio duration",
+        f"{float(dur):.1f} s" if dur is not None else "—",
+        help="Length of the rendered narration audio after trim/normalise.",
+    )
+    sr = tts.get("sample_rate")
+    k3.metric(
+        "Sample rate",
+        f"{_intify(sr)} Hz" if sr is not None else "—",
+        help="Output sample rate for the narration file.",
+    )
+    voice = tts.get("voice") or narr.get("tts_voice") or ""
+    k4.metric(
+        "Voice preset",
+        (str(voice)[:28] + "…") if len(str(voice)) > 30 else str(voice or "—"),
+        help="Bark voice preset.",
+    )
+
+    k5, k6, k7, k8 = st.columns(4)
+    amb_on = bool(tts.get("or_ambience") or narr.get("or_ambience"))
+    k5.metric("OR ambience", "On" if amb_on else "Off")
+    fs = tts.get("foley_segments")
+    if fs is not None:
+        k6.metric("Foley clips mixed", str(_intify(fs)))
+    else:
+        k6.metric("Foley clips mixed", "—")
+    k7.metric(
+        "Text backend",
+        str(narr.get("narration_backend") or "template"),
+        help="template / ollama / huggingface — how spoken lines were produced.",
+    )
+    prov = tts.get("provider") or narr.get("tts_provider") or "bark"
+    k8.metric("TTS provider", str(prov))
+
+    resolved = meta.get("resolved") if isinstance(meta.get("resolved"), dict) else {}
+    vid_s = resolved.get("effective_playback_seconds")
+    aud_s = tts.get("duration_seconds")
+    if vid_s is not None and aud_s is not None:
+        gap = float(aud_s) - float(vid_s)
+        with st.expander("Audio vs video length", expanded=False):
+            st.write(
+                f"Video segment (effective): **{float(vid_s):.2f} s** · "
+                f"Narration audio: **{float(aud_s):.2f} s** · "
+                f"Difference: **{gap:+.2f} s** "
+                f"(mux uses `-shortest` when combining)."
+            )
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Suturing Real-vs-Generated",
@@ -1120,10 +1212,11 @@ def main() -> None:
         duration = st.slider(
             "Duration (seconds)",
             min_value=5,
-            max_value=30,
+            max_value=90,
             value=10,
             step=1,
-            help="How long the generated MP4 should play back.",
+            help="Longer clips need more frames; temporal anchors may drift — "
+            "see Advanced → reset anchor every N frames.",
         )
 
         with st.expander("Advanced settings", expanded=False):
@@ -1150,6 +1243,19 @@ def main() -> None:
             init_strength = st.slider(
                 "Init strength", 0.3, 1.0, 0.7, 0.05,
                 help="1.0 = pure noise (no anchor). Lower = stronger temporal coherence.",
+            )
+            anchor_reset_every_ui = st.number_input(
+                "Reset temporal anchor every N frames (0 = never)",
+                min_value=0,
+                max_value=200,
+                value=0,
+                step=1,
+                help=(
+                    "Long clips: chaining prev_gen or flow_warp can drift or smear. "
+                    "Every N frames, skip the anchor and sample from scratch (same "
+                    "as frame 0). Try 15–30 if distortion builds over time; tradeoff "
+                    "is occasional sharper cuts."
+                ),
             )
             enable_narration = st.checkbox(
                 "Enable narration audio",
@@ -1448,6 +1554,7 @@ def main() -> None:
                 image_size=int(image_size),
                 anchor_mode=anchor_mode,
                 init_strength=float(init_strength),
+                anchor_reset_every=int(anchor_reset_every_ui),
                 held_out=fold_n,
                 run_name=run_name,
                 log_container=log_box,
@@ -1527,6 +1634,8 @@ def main() -> None:
             if real_path.exists() and gen_path.exists():
                 render_metrics_board(real_path, gen_path, fps_hint=float(fps_out))
 
+            render_narration_metrics_board(meta if isinstance(meta, dict) else None)
+
             if meta:
                 with st.expander("Run metadata", expanded=False):
                     st.json(meta)
@@ -1537,6 +1646,7 @@ def main() -> None:
                     data=f.read(),
                     file_name=f"{run_name}_{selected_side.name}",
                     mime="video/mp4",
+                    key=f"dl_side_gen_{run_name}",
                 )
 
             _render_narration_downloads(out_dir, key_prefix=f"gen_{run_name}")

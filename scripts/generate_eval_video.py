@@ -23,7 +23,11 @@ The SD model was trained with ``frame_stride=90`` on a single frame per
 step; it has no explicit temporal-consistency term, so expect flicker
 between adjacent generated frames.  Using ``--fixed_seed`` (default)
 re-uses the same noise latent for every frame, which empirically gives
-the most coherent output under these constraints.
+the most coherent output under these constraints.  For long clips,
+chaining ``--anchor_mode prev_gen`` or ``flow_warp`` can still drift or
+smear; use ``--anchor_reset_every N`` to periodically drop the anchor
+and resample from noise (reduces compound error, at the cost of rarer
+sharp transitions).
 
 Example
 -------
@@ -366,6 +370,17 @@ def _parse_args() -> argparse.Namespace:
             "temporal coherence; too low freezes motion)."
         ),
     )
+    p.add_argument(
+        "--anchor_reset_every",
+        type=int,
+        default=0,
+        help=(
+            "If > 0, skip temporal anchoring every N output frames (1-based "
+            "count within this clip). Reduces long-horizon drift when "
+            "chaining prev_gen/flow_warp, at the cost of occasional sharper "
+            "transitions. 0 = never reset (default)."
+        ),
+    )
     return p.parse_args()
 
 
@@ -652,7 +667,11 @@ def main() -> None:
             # --- choose anchor image for this frame ----------------------
             init_image: Optional[np.ndarray] = None
             anchor_used = "none"
-            if args.anchor_mode != "none" and prev_gen_rgb is not None:
+            reset_n = max(0, int(args.anchor_reset_every))
+            skip_anchor = reset_n > 0 and i > 0 and (i % reset_n == 0)
+            if skip_anchor:
+                anchor_used = "periodic_reset"
+            elif args.anchor_mode != "none" and prev_gen_rgb is not None:
                 if args.anchor_mode == "prev_gen":
                     init_image = prev_gen_rgb
                     anchor_used = "prev_gen"
@@ -986,6 +1005,7 @@ def main() -> None:
         "anchoring": {
             "mode": args.anchor_mode,
             "init_strength": float(args.init_strength),
+            "anchor_reset_every": int(max(0, args.anchor_reset_every)),
         },
         "rendered_frames": len(per_frame_records),
         "total_generation_seconds": round(total_gen_time, 2),
