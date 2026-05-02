@@ -116,6 +116,10 @@ class SDSampler:
             "model_id", "stable-diffusion-v1-5/stable-diffusion-v1-5"
         )
 
+        enc_state = ckpt["encoder_state_dict"]
+        kin_dim = int(enc_state["mlp.0.weight"].shape[1])
+        self.kin_dim = kin_dim
+
         # -- lazy imports so importing this module is cheap ------------------
         from diffusers import AutoencoderKL, DDIMScheduler, UNet2DConditionModel
 
@@ -156,18 +160,26 @@ class SDSampler:
         scale_list = scaler_params.get("scale")
         if mean_list is not None:
             self.kin_mean = np.asarray(mean_list, dtype=np.float64)
+            if self.kin_mean.shape[0] != kin_dim:
+                raise ValueError(
+                    f"checkpoint scaler mean length {self.kin_mean.shape[0]} "
+                    f"does not match encoder kin_dim {kin_dim}"
+                )
         else:
-            self.kin_mean = np.zeros(76, dtype=np.float64)
+            self.kin_mean = np.zeros(kin_dim, dtype=np.float64)
         if scale_list is not None:
             self.kin_scale = np.asarray(scale_list, dtype=np.float64)
+            if self.kin_scale.shape[0] != kin_dim:
+                raise ValueError(
+                    f"checkpoint scaler scale length {self.kin_scale.shape[0]} "
+                    f"does not match encoder kin_dim {kin_dim}"
+                )
         else:
-            self.kin_scale = np.ones(76, dtype=np.float64)
+            self.kin_scale = np.ones(kin_dim, dtype=np.float64)
 
         # -- restore KinematicEncoder ----------------------------------------
         self.gesture_to_int: Dict[str, int] = ckpt.get("gesture_to_int", {}) or {}
         self.num_gestures = max(len(self.gesture_to_int), 1)
-        enc_state = ckpt["encoder_state_dict"]
-        kin_dim = int(enc_state["mlp.0.weight"].shape[1])
         num_sem = 0
         st = enc_state.get("semantic_tokens")
         if st is not None:
@@ -195,7 +207,7 @@ class SDSampler:
 
     # ------------------------------------------------------------------
     def scale_kin(self, kin_row: np.ndarray) -> np.ndarray:
-        """Apply the checkpoint's StandardScaler to a raw 76-dim kin row."""
+        """Apply the checkpoint's StandardScaler to a raw kinematics row."""
         kin = np.asarray(kin_row, dtype=np.float64).reshape(-1)
         denom = np.where(self.kin_scale == 0, 1.0, self.kin_scale)
         return (kin - self.kin_mean) / denom
@@ -271,9 +283,9 @@ class SDSampler:
         Parameters
         ----------
         kin_row:
-            Raw 76-dim kinematic vector (numpy or tensor-like).  Will be
-            standardised with the checkpoint's scaler unless
-            ``already_scaled=True``.
+            Raw kinematics vector (``76`` or ``80`` dims when motion features
+            were appended at train time).  Standardised with the checkpoint's
+            scaler unless ``already_scaled=True``.
         gesture_int:
             Integer gesture class index (must be within
             ``range(self.num_gestures)``).

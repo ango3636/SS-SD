@@ -230,6 +230,7 @@ def main() -> None:
     itr = args.itr if args.itr is not None else saved.get("itr", 1)
     capture = args.capture if args.capture is not None else saved.get("capture", 1)
     append_motion = bool(saved.get("append_motion_features", False))
+    ckpt_gesture_to_int: Dict[str, int] = ckpt.get("gesture_to_int", {}) or {}
     if not ckpt_gesture_to_int:
         raise RuntimeError(
             "Checkpoint has no gesture_to_int mapping; cannot run eval."

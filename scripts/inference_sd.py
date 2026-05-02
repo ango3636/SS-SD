@@ -88,7 +88,14 @@ def main() -> None:
     )
     print(f"Loaded SD on device: {sampler.device}")
 
+    append_motion = bool(sampler.saved_args.get("append_motion_features", False))
     kin_all = parse_kinematics(args.kinematics_file)
+    if append_motion:
+        from suturing_pipeline.kinematics.motion_columns import (
+            append_motion_columns,
+        )
+
+        kin_all = append_motion_columns(kin_all)
     if args.frame_index >= len(kin_all):
         raise IndexError(
             f"frame_index {args.frame_index} out of range "
