@@ -138,10 +138,9 @@ def _resolve_device(requested: str | None) -> torch.device:
             raise RuntimeError(
                 "CUDA was requested (--device cuda) but this PyTorch build has no CUDA. "
                 "In Colab: Runtime → Change runtime type → GPU, then Runtime → Restart session "
-                "and run all cells. If you already use a GPU runtime, reinstall CUDA PyTorch "
-                "before other packages, e.g.\n"
-                "  pip install torch torchvision --index-url "
-                "https://download.pytorch.org/whl/cu124"
+                "and run all cells. Prefer Colab's preinstalled torch; avoid overwriting it with "
+                "the wrong CUDA wheel (cu124 vs cu128). If you must reinstall, pick the wheel "
+                "matching your runtime from https://pytorch.org/get-started/locally/"
             )
         return dev
     if torch.cuda.is_available():
