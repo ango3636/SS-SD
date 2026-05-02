@@ -197,15 +197,22 @@ def main() -> None:
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
+    print(f"train_sd.py started | device={device} | mode={args.train_mode}", flush=True)
+
     # -- lazy imports so the script can parse --help without heavy deps --------
     from diffusers import AutoencoderKL, DDPMScheduler, UNet2DConditionModel
 
-    print(f"Loading SD components from {args.model_id} ...")
+    print(f"Loading SD components from {args.model_id} ...", flush=True)
+    print("  (downloading ~4 GB on first run — this can take 10-30 min; patience)", flush=True)
+    print("  loading vae ...", flush=True)
     vae = AutoencoderKL.from_pretrained(args.model_id, subfolder="vae")
+    print("  loading unet ...", flush=True)
     unet = UNet2DConditionModel.from_pretrained(args.model_id, subfolder="unet")
+    print("  loading scheduler ...", flush=True)
     noise_scheduler = DDPMScheduler.from_pretrained(
         args.model_id, subfolder="scheduler"
     )
+    print("SD components loaded.", flush=True)
 
     vae.to(device)
     unet.to(device)
@@ -222,6 +229,7 @@ def main() -> None:
     if args.train_mode == "lora":
         from peft import LoraConfig, get_peft_model
 
+        print("Attaching LoRA adapters ...", flush=True)
         lora_config = LoraConfig(
             r=args.lora_rank,
             lora_alpha=args.lora_rank,
@@ -238,7 +246,7 @@ def main() -> None:
     unet.train()
 
     # -- dataset ---------------------------------------------------------------
-    print("Building dataset ...")
+    print("Building dataset ... (may be slow when reading from Google Drive)", flush=True)
     dataset = JIGSAWSDataset(
         data_root=args.data_root,
         split="train",
@@ -261,7 +269,7 @@ def main() -> None:
         pin_memory=device.type == "cuda",
         drop_last=True,
     )
-    print(f"  {len(dataset)} frames, {len(loader)} batches/epoch")
+    print(f"  {len(dataset)} frames, {len(loader)} batches/epoch", flush=True)
 
     # Serialise scaler params for checkpoint
     scaler_params = {
@@ -304,7 +312,7 @@ def main() -> None:
     global_step = 0
     vae_scale = vae.config.scaling_factor
 
-    print(f"Training on {device} | mode={args.train_mode} | epochs={args.epochs}")
+    print(f"Training on {device} | mode={args.train_mode} | epochs={args.epochs}", flush=True)
     for epoch in range(args.epochs):
         epoch_loss = 0.0
         pbar = tqdm(loader, desc=f"Epoch {epoch + 1}/{args.epochs}")
@@ -366,7 +374,7 @@ def main() -> None:
             )
 
         avg = epoch_loss / max(len(loader), 1)
-        print(f"  Epoch {epoch + 1} avg loss: {avg:.5f}")
+        print(f"  Epoch {epoch + 1} avg loss: {avg:.5f}", flush=True)
 
     # Final checkpoint
     _save_checkpoint(
@@ -380,7 +388,7 @@ def main() -> None:
         dataset.gesture_to_int,
         args.train_mode,
     )
-    print("Training complete.")
+    print("Training complete.", flush=True)
 
 
 if __name__ == "__main__":
