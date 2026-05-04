@@ -18,6 +18,64 @@ from .foley import FoleyLibrary, place_foley_on_segment
 from .narration_templates import GESTURE_AMBIENCE
 
 BARK_SAMPLE_RATE = 24_000
+
+
+def _foley_layer_waveforms_for_segment(
+    seg: Dict[str, object],
+    foley_lib: FoleyLibrary,
+) -> list[np.ndarray]:
+    """Collect 1..N mono foley clips for one narration segment.
+
+    Resolution order:
+
+    1. ``foley_gestures`` — non-empty list of gesture stems (e.g. ``["G3",
+       "G5"]``); each resolved via :meth:`FoleyLibrary.get_mono` (deduped
+       case-insensitively, order preserved).
+    2. ``foley_gesture_left`` / ``foley_gesture_right`` — optional second class;
+       left defaults to segment ``gesture``.
+    3. ``{gesture}_L.wav`` + ``{gesture}_R.wav`` if both exist.
+    4. Single ``{gesture}.wav``.
+    """
+    raw_list = seg.get("foley_gestures")
+    if isinstance(raw_list, (list, tuple)) and len(raw_list) > 0:
+        out: list[np.ndarray] = []
+        seen_upper: set[str] = set()
+        for item in raw_list:
+            g = str(item).strip()
+            if not g:
+                continue
+            gu = g.upper()
+            if gu in seen_upper:
+                continue
+            seen_upper.add(gu)
+            w = foley_lib.get_mono(g)
+            if w is not None:
+                out.append(w)
+        if out:
+            return out
+
+    primary = str(seg.get("gesture", "")).strip() or "G1"
+    left_g = str(seg.get("foley_gesture_left", "")).strip() or primary
+    right_g = str(seg.get("foley_gesture_right", "")).strip()
+    if right_g:
+        if right_g.upper() != left_g.upper():
+            pair_lr: list[np.ndarray] = []
+            for g in (left_g, right_g):
+                w = foley_lib.get_mono(g)
+                if w is not None:
+                    pair_lr.append(w)
+            if pair_lr:
+                return pair_lr
+        else:
+            w = foley_lib.get_mono(left_g)
+            return [w] if w is not None else []
+
+    lr = foley_lib.get_mono_lr_pair(primary)
+    if lr is not None:
+        return [lr[0], lr[1]]
+
+    w = foley_lib.get_mono(primary)
+    return [w] if w is not None else []
 DEFAULT_VOICE_PRESET = "v2/en_speaker_9"
 
 # librosa.effects.time_stretch ``rate``: >1 speeds up (shortens), <1 slows down.
@@ -360,16 +418,18 @@ class BarkTTSConverter:
                 amb = _match_length(amb, wav.shape[0])
                 wav = wav + amb.astype(np.float32) * amb_gain
             if foley_lib is not None:
-                gesture = str(seg.get("gesture", "")).strip() or "G1"
-                foley_wav = foley_lib.get_mono(gesture)
-                if foley_wav is not None:
-                    placed = place_foley_on_segment(
-                        foley_wav,
-                        wav.shape[0],
-                        align=foley_align,
-                    )
+                layers = _foley_layer_waveforms_for_segment(seg, foley_lib)
+                if layers:
                     fg = float(10.0 ** (foley_gain_db / 20.0))
-                    wav = wav + placed * fg
+                    n = max(1, len(layers))
+                    per = fg / math.sqrt(float(n))
+                    for foley_wav in layers:
+                        placed = place_foley_on_segment(
+                            foley_wav,
+                            wav.shape[0],
+                            align=foley_align,
+                        )
+                        wav = wav + placed.astype(np.float32) * per
                     foley_segments += 1
             # Pad to nominal window when Bark is short; never trim (avoids clipped words).
             nominal_samples = max(1, int(round(target_dur * self.sample_rate)))

@@ -269,10 +269,13 @@ def _parse_args() -> argparse.Namespace:
         "--foley_dir",
         default=None,
         help=(
-            "Optional directory of mono/stereo WAV files named G1.wav … G15.wav "
-            "(case-insensitive stem). Each file is mixed once per matching "
+            "Optional directory of mono WAV files named G1.wav … G15.wav "
+            "(case-insensitive stem). Each file is mixed per matching "
             "narration segment at --foley_gain_db (default -12 dB), aligned "
-            "with --foley_align. Missing gestures are skipped."
+            "with --foley_align. Missing gestures are skipped. For two layers "
+            "on the same label, add Gn_L.wav and Gn_R.wav. For two gesture "
+            "classes in one segment, set foley_gestures or foley_gesture_right "
+            "in narration_segments.json before synthesis."
         ),
     )
     p.add_argument(

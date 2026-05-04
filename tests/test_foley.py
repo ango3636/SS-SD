@@ -11,6 +11,7 @@ from suturing_pipeline.audio.foley import (
     FoleyLibrary,
     place_foley_on_segment,
 )
+from suturing_pipeline.audio.tts_converter import _foley_layer_waveforms_for_segment
 
 
 def test_place_foley_start_and_center() -> None:
@@ -44,3 +45,54 @@ def test_foley_library_case_insensitive_stem(tmp_path: Path) -> None:
     wavfile.write(str(p), 24000, np.zeros(80, dtype=np.int16))
     lib = FoleyLibrary(tmp_path, sample_rate=24000)
     assert lib.get_mono("G2") is not None
+
+
+def test_foley_library_lr_pair(tmp_path: Path) -> None:
+    sr = 8000
+    for name, data in (("G2_L.wav", 100), ("G2_R.wav", 120)):
+        wavfile.write(
+            str(tmp_path / name),
+            sr,
+            (np.ones(data, dtype=np.float32) * 0.2 * 32767).astype(np.int16),
+        )
+    lib = FoleyLibrary(tmp_path, sample_rate=8000)
+    pair = lib.get_mono_lr_pair("G2")
+    assert pair is not None
+    assert pair[0].shape[0] == 100 and pair[1].shape[0] == 120
+
+
+def test_foley_library_lr_pair_requires_both(tmp_path: Path) -> None:
+    wavfile.write(str(tmp_path / "G2_L.wav"), 8000, np.zeros(50, dtype=np.int16))
+    lib = FoleyLibrary(tmp_path, sample_rate=8000)
+    assert lib.get_mono_lr_pair("G2") is None
+
+
+def test_foley_layer_waveforms_priority(tmp_path: Path) -> None:
+    sr = 8000
+    wavfile.write(str(tmp_path / "G1.wav"), sr, np.ones(30, dtype=np.int16))
+    wavfile.write(str(tmp_path / "G2.wav"), sr, np.ones(40, dtype=np.int16) * 2)
+    lib = FoleyLibrary(tmp_path, sample_rate=8000)
+    seg = {"gesture": "G9", "foley_gestures": ["G1", "G2"]}
+    layers = _foley_layer_waveforms_for_segment(seg, lib)
+    assert len(layers) == 2
+    assert layers[0].shape[0] == 30 and layers[1].shape[0] == 40
+
+
+def test_foley_layer_waveforms_left_right_keys(tmp_path: Path) -> None:
+    sr = 8000
+    wavfile.write(str(tmp_path / "G3.wav"), sr, np.ones(20, dtype=np.int16))
+    wavfile.write(str(tmp_path / "G4.wav"), sr, np.ones(25, dtype=np.int16) * 3)
+    lib = FoleyLibrary(tmp_path, sample_rate=8000)
+    seg = {"gesture": "G1", "foley_gesture_right": "G4", "foley_gesture_left": "G3"}
+    layers = _foley_layer_waveforms_for_segment(seg, lib)
+    assert len(layers) == 2
+
+
+def test_foley_layer_lr_files(tmp_path: Path) -> None:
+    sr = 8000
+    wavfile.write(str(tmp_path / "GX_L.wav"), sr, np.ones(10, dtype=np.int16))
+    wavfile.write(str(tmp_path / "GX_R.wav"), sr, np.ones(12, dtype=np.int16))
+    lib = FoleyLibrary(tmp_path, sample_rate=8000)
+    seg = {"gesture": "GX"}
+    layers = _foley_layer_waveforms_for_segment(seg, lib)
+    assert len(layers) == 2

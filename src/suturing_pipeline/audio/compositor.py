@@ -141,6 +141,8 @@ def _build_segments_from_trial(
                 "narration_text": payload["narration_text"],
                 "summary": payload["summary"],
                 "kinematics_values": kinematics_segment_to_jsonable(kin_segment),
+                # Optional (for WAV foley): "foley_gestures": ["G3", "G5"],
+                # "foley_gesture_left" / "foley_gesture_right", or Gn_L.wav+Gn_R.wav.
             }
         )
     return segments

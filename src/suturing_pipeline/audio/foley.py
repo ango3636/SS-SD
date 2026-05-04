@@ -1,4 +1,10 @@
-"""Optional gesture-keyed WAV foley mixed under Bark (and optional AudioGen bed)."""
+"""Optional gesture-keyed WAV foley mixed under Bark (and optional AudioGen bed).
+
+Each gesture maps to ``<GESTURE>.wav`` (e.g. ``G3.wav``). For a **stereo-style
+dual layer** without changing the transcription label, add matching
+``<GESTURE>_L.wav`` and ``<GESTURE>_R.wav``; when both exist they are mixed
+together (mono sum with headroom scaling) for that segment.
+"""
 
 from __future__ import annotations
 
@@ -62,7 +68,12 @@ def place_foley_on_segment(
 
 
 class FoleyLibrary:
-    """Load ``{gesture}.wav`` files from a directory (e.g. ``G3.wav``)."""
+    """Load ``{gesture}.wav`` files from a directory (e.g. ``G3.wav``).
+
+    For **per-hand layers** on the same semantic gesture, optional
+    ``{gesture}_L.wav`` and ``{gesture}_R.wav`` (case-insensitive stem) can be
+    used together via :meth:`get_mono_lr_pair`.
+    """
 
     def __init__(self, foley_dir: str | Path, sample_rate: int) -> None:
         self.root = Path(foley_dir).expanduser().resolve()
@@ -107,6 +118,22 @@ class FoleyLibrary:
         wav = _resample_mono(wav, sr, self.sample_rate)
         self._cache[key] = wav
         return wav.copy()
+
+    def get_mono_lr_pair(self, gesture: str) -> Optional[tuple[np.ndarray, np.ndarray]]:
+        """Return ``(left, right)`` mono clips if both ``{G}_L.wav`` and ``{G}_R.wav`` exist.
+
+        Stems are matched the same way as :meth:`get_mono` (case-insensitive).
+        If either side is missing, returns ``None`` so callers can fall back to
+        a single ``{G}.wav``.
+        """
+        g = str(gesture).strip()
+        if not g:
+            return None
+        left = self.get_mono(f"{g}_L")
+        right = self.get_mono(f"{g}_R")
+        if left is None or right is None:
+            return None
+        return (left, right)
 
 
 __all__ = [
