@@ -812,13 +812,15 @@ def render_previous_run(run_info: Dict[str, object], fps_hint: float) -> None:
             keep_audio=gen_has_audio,
         )
 
-    if real_path.exists() and gen_path.exists():
-        try:
-            render_metrics_board(real_path, gen_path, fps_hint=float(fps_hint))
-        except Exception as e:  # pragma: no cover - defensive UI path
-            st.info(f"Metrics board unavailable: {e}")
-
-    render_narration_metrics_board(meta if isinstance(meta, dict) else None)
+    try:
+        render_evaluation_metrics_tabs(
+            real_path,
+            gen_path,
+            fps_hint=float(fps_hint),
+            meta=meta if isinstance(meta, dict) else None,
+        )
+    except Exception as e:  # pragma: no cover - defensive UI path
+        st.info(f"Evaluation metrics unavailable: {e}")
 
     if meta:
         with st.expander("Run metadata", expanded=False):
@@ -885,13 +887,47 @@ def _fmt_mmss(seconds: float) -> str:
     return f"{s // 60:d}:{s % 60:02d}"
 
 
-def render_metrics_board(
+def _nested_dict_get(root: object, *keys: str) -> object:
+    cur: object = root
+    for k in keys:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(k)
+    return cur
+
+
+def _format_eval_scalar(value: object) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and not value == value:  # NaN
+            return "—"
+        v = float(value)
+        if abs(v - round(v)) < 1e-6:
+            return str(int(round(v)))
+        return f"{v:.3g}".rstrip("0").rstrip(".")
+    return str(value)[:48]
+
+
+def _intify(x: object, default: int = 0) -> int:
+    try:
+        return int(x)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _render_video_generation_metrics(
     real_path: Path, gen_path: Path, fps_hint: float
 ) -> None:
-    """Show a user-friendly metrics board comparing the two MP4s."""
+    """Pixel- and motion-based scores comparing real vs generated video."""
     import pandas as pd  # local import so we only pay it after generation
 
     if not (real_path.exists() and gen_path.exists()):
+        st.info(
+            "Real and generated MP4s are both required for video metrics."
+        )
         return
 
     with st.spinner("Scoring the generated clip..."):
@@ -909,12 +945,10 @@ def render_metrics_board(
 
     if data is None:
         st.info(
-            "Metrics board unavailable (couldn't read the rendered clips)."
+            "Video metrics unavailable (couldn't read the rendered clips)."
         )
         return
 
-    st.divider()
-    st.subheader("Metrics board: how good is this generation?")
     st.caption(
         "Plain-language scores for this clip.  All three sub-scores are on "
         "the same 0-100 scale; higher is better."
@@ -1049,91 +1083,195 @@ def render_metrics_board(
     )
 
 
-def render_narration_metrics_board(meta: Optional[dict]) -> None:
-    """Show narration/TTS summary when ``metadata.json`` includes narration."""
+def _render_narration_generation_tab(meta: Optional[dict]) -> None:
+    """TTS pipeline summary plus optional speech-evaluation scores from metadata."""
     if not meta or not isinstance(meta, dict):
+        st.caption("No run metadata loaded.")
+        speech_wer = _nested_dict_get(meta, "eval", "speech", "wer")
+        speech_acc = _nested_dict_get(meta, "eval", "speech", "accuracy")
+        speech_sum = _nested_dict_get(meta, "eval", "speech", "summary_quality")
+        st.markdown("**Speech evaluation**")
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Speech: WER", _format_eval_scalar(speech_wer))
+        s2.metric("Accuracy", _format_eval_scalar(speech_acc))
+        s3.metric("Summary quality", _format_eval_scalar(speech_sum))
         return
+
     narr = meta.get("narration")
     if not isinstance(narr, dict) or not narr.get("enabled"):
-        return
-
-    st.divider()
-    st.subheader("Narration / voice metrics")
-    st.caption(
-        "Summarises the Bark narration track for this run (from metadata). "
-        "Video scores above compare pixels and motion only."
-    )
-
-    err = narr.get("error")
-    if err:
-        st.warning(f"Narration pipeline reported an error: {err}")
-
-    tts: Dict = narr.get("tts") if isinstance(narr.get("tts"), dict) else {}
-
-    def _intify(x: object, default: int = 0) -> int:
-        try:
-            return int(x)  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return default
-
-    segs = tts.get("segments")
-    if segs is None:
-        segs = narr.get("segment_count")
-    seg_display = str(_intify(segs)) if segs is not None else "—"
-
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric(
-        "Narration segments",
-        seg_display,
-        help="Gesture-aligned speech segments in the mixed track.",
-    )
-    dur = tts.get("duration_seconds")
-    k2.metric(
-        "Audio duration",
-        f"{float(dur):.1f} s" if dur is not None else "—",
-        help="Length of the rendered narration audio after trim/normalise.",
-    )
-    sr = tts.get("sample_rate")
-    k3.metric(
-        "Sample rate",
-        f"{_intify(sr)} Hz" if sr is not None else "—",
-        help="Output sample rate for the narration file.",
-    )
-    voice = tts.get("voice") or narr.get("tts_voice") or ""
-    k4.metric(
-        "Voice preset",
-        (str(voice)[:28] + "…") if len(str(voice)) > 30 else str(voice or "—"),
-        help="Bark voice preset.",
-    )
-
-    k5, k6, k7, k8 = st.columns(4)
-    amb_on = bool(tts.get("or_ambience") or narr.get("or_ambience"))
-    k5.metric("OR ambience", "On" if amb_on else "Off")
-    fs = tts.get("foley_segments")
-    if fs is not None:
-        k6.metric("Foley clips mixed", str(_intify(fs)))
+        st.info("Narration was not enabled for this run.")
     else:
-        k6.metric("Foley clips mixed", "—")
-    k7.metric(
-        "Text backend",
-        str(narr.get("narration_backend") or "template"),
-        help="template / ollama / huggingface — how spoken lines were produced.",
-    )
-    prov = tts.get("provider") or narr.get("tts_provider") or "bark"
-    k8.metric("TTS provider", str(prov))
+        st.caption(
+            "Pipeline summary from `metadata.json` (TTS and text backend)."
+        )
+        err = narr.get("error")
+        if err:
+            st.warning(f"Narration pipeline reported an error: {err}")
 
-    resolved = meta.get("resolved") if isinstance(meta.get("resolved"), dict) else {}
-    vid_s = resolved.get("effective_playback_seconds")
-    aud_s = tts.get("duration_seconds")
-    if vid_s is not None and aud_s is not None:
-        gap = float(aud_s) - float(vid_s)
-        with st.expander("Audio vs video length", expanded=False):
-            st.write(
-                f"Video segment (effective): **{float(vid_s):.2f} s** · "
-                f"Narration audio: **{float(aud_s):.2f} s** · "
-                f"Difference: **{gap:+.2f} s** "
-                f"(mux uses `-shortest` when combining)."
-            )
+        tts: Dict = narr.get("tts") if isinstance(narr.get("tts"), dict) else {}
+        segs = tts.get("segments")
+        if segs is None:
+            segs = narr.get("segment_count")
+        seg_display = str(_intify(segs)) if segs is not None else "—"
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric(
+            "Narration segments",
+            seg_display,
+            help="Gesture-aligned speech segments in the mixed track.",
+        )
+        dur = tts.get("duration_seconds")
+        k2.metric(
+            "Audio duration",
+            f"{float(dur):.1f} s" if dur is not None else "—",
+            help="Length of the rendered narration audio after trim/normalise.",
+        )
+        sr = tts.get("sample_rate")
+        k3.metric(
+            "Sample rate",
+            f"{_intify(sr)} Hz" if sr is not None else "—",
+            help="Output sample rate for the narration file.",
+        )
+        voice = tts.get("voice") or narr.get("tts_voice") or ""
+        k4.metric(
+            "Voice preset",
+            (str(voice)[:28] + "…")
+            if len(str(voice)) > 30
+            else str(voice or "—"),
+            help="Bark voice preset.",
+        )
+
+        k7, k8 = st.columns(2)
+        k7.metric(
+            "Text backend",
+            str(narr.get("narration_backend") or "template"),
+            help=(
+                "template / ollama / huggingface — how spoken lines were "
+                "produced."
+            ),
+        )
+        prov = tts.get("provider") or narr.get("tts_provider") or "bark"
+        k8.metric("TTS provider", str(prov))
+
+        resolved = (
+            meta.get("resolved") if isinstance(meta.get("resolved"), dict) else {}
+        )
+        vid_s = resolved.get("effective_playback_seconds")
+        aud_s = tts.get("duration_seconds")
+        if vid_s is not None and aud_s is not None:
+            gap = float(aud_s) - float(vid_s)
+            with st.expander("Audio vs video length", expanded=False):
+                st.write(
+                    f"Video segment (effective): **{float(vid_s):.2f} s** · "
+                    f"Narration audio: **{float(aud_s):.2f} s** · "
+                    f"Difference: **{gap:+.2f} s** "
+                    f"(mux uses `-shortest` when combining)."
+                )
+
+    st.markdown("**Speech evaluation**")
+    st.caption(
+        "Optional fields under `eval.speech` in `metadata.json` (WER, "
+        "accuracy, summary quality) — for ASR, rubric scores, or human study."
+    )
+    speech_wer = _nested_dict_get(meta, "eval", "speech", "wer")
+    speech_acc = _nested_dict_get(meta, "eval", "speech", "accuracy")
+    speech_sum = _nested_dict_get(meta, "eval", "speech", "summary_quality")
+    s1, s2, s3 = st.columns(3)
+    s1.metric(
+        "Speech: WER",
+        _format_eval_scalar(speech_wer),
+        help="Word error rate vs reference transcript (lower is better).",
+    )
+    s2.metric(
+        "Accuracy",
+        _format_eval_scalar(speech_acc),
+        help="Task-dependent accuracy (e.g. gesture or fact correctness).",
+    )
+    s3.metric(
+        "Summary quality",
+        _format_eval_scalar(speech_sum),
+        help="Rubric or model-based score for narration summary quality.",
+    )
+
+
+def _render_sound_effects_tab(meta: Optional[dict]) -> None:
+    """Foley / ambience flags from the run plus optional music-sound rubrics."""
+    tts: Dict = {}
+    narr: Dict = {}
+    narr_on = False
+    if meta and isinstance(meta, dict):
+        narr_obj = meta.get("narration")
+        if isinstance(narr_obj, dict):
+            narr = narr_obj
+            if narr.get("enabled"):
+                narr_on = True
+                tts = narr.get("tts") if isinstance(narr.get("tts"), dict) else {}
+
+    st.markdown("**Mix (this run)**")
+    if not narr_on:
+        st.caption("Enable narration (with foley / ambience) to populate mix stats.")
+    amb_on = bool(tts.get("or_ambience") or narr.get("or_ambience"))
+    fs = tts.get("foley_segments")
+    m1, m2 = st.columns(2)
+    m1.metric(
+        "OR ambience",
+        "On" if amb_on else "Off",
+        help="Operating-room ambience layer when narration is enabled.",
+    )
+    m2.metric(
+        "Foley clips mixed",
+        str(_intify(fs)) if fs is not None else "—",
+        help="Count of gesture-keyed foley clips in the final mix.",
+    )
+
+    st.markdown("**Music / sound evaluation**")
+    st.caption(
+        "Optional fields under `eval.sound` in `metadata.json` — prompt "
+        "alignment, perceived realism, and diversity across samples."
+    )
+    pa = _nested_dict_get(meta, "eval", "sound", "prompt_alignment")
+    rl = _nested_dict_get(meta, "eval", "sound", "realism")
+    dv = _nested_dict_get(meta, "eval", "sound", "diversity")
+    u1, u2, u3 = st.columns(3)
+    u1.metric(
+        "Prompt alignment",
+        _format_eval_scalar(pa),
+        help="How well generated audio matches the intended prompt or gesture.",
+    )
+    u2.metric(
+        "Realism",
+        _format_eval_scalar(rl),
+        help="Subjective or model-based naturalness / plausibility.",
+    )
+    u3.metric(
+        "Diversity",
+        _format_eval_scalar(dv),
+        help="Variety across clips or generations (e.g. embedding spread).",
+    )
+
+
+def render_evaluation_metrics_tabs(
+    real_path: Path,
+    gen_path: Path,
+    fps_hint: float,
+    meta: Optional[dict],
+) -> None:
+    """Tabbed evaluation: video, narration, and sound-effects categories."""
+    st.divider()
+    st.subheader("Evaluation metrics")
+    tab_video, tab_narr, tab_sound = st.tabs(
+        [
+            "Video generation",
+            "Narration generation",
+            "Sound effects",
+        ]
+    )
+    with tab_video:
+        _render_video_generation_metrics(real_path, gen_path, fps_hint)
+    with tab_narr:
+        _render_narration_generation_tab(meta)
+    with tab_sound:
+        _render_sound_effects_tab(meta)
 
 
 def main() -> None:
@@ -1631,10 +1769,12 @@ def main() -> None:
                     keep_audio=gen_has_audio,
                 )
 
-            if real_path.exists() and gen_path.exists():
-                render_metrics_board(real_path, gen_path, fps_hint=float(fps_out))
-
-            render_narration_metrics_board(meta if isinstance(meta, dict) else None)
+            render_evaluation_metrics_tabs(
+                real_path,
+                gen_path,
+                fps_hint=float(fps_out),
+                meta=meta if isinstance(meta, dict) else None,
+            )
 
             if meta:
                 with st.expander("Run metadata", expanded=False):
