@@ -330,6 +330,23 @@ def _parse_args() -> argparse.Namespace:
         help="Per-segment HTTP timeout when calling Ollama or Hugging Face.",
     )
     p.add_argument(
+        "--skip_speech_eval",
+        action="store_true",
+        help=(
+            "When narration is enabled, skip Whisper ASR and WER under "
+            "metadata eval.speech (faster; no model download)."
+        ),
+    )
+    p.add_argument(
+        "--speech_eval_device",
+        default="cpu",
+        choices=["cpu", "cuda", "mps", "auto"],
+        help=(
+            "Torch device for Whisper ASR. Default cpu avoids competing with SD "
+            "for GPU memory in this process. Use auto to match --device."
+        ),
+    )
+    p.add_argument(
         "--compare",
         action="store_true",
         help=(
@@ -754,6 +771,7 @@ def main() -> None:
 
     narration_info: Dict[str, object] = {"enabled": bool(args.enable_narration)}
     narration_failure: Optional[str] = None
+    speech_eval_speech: Optional[Dict[str, object]] = None
     if args.enable_narration:
         print("Building narration segments ...")
         expert_stats: Dict[str, Dict[str, float]] = {}
@@ -900,6 +918,35 @@ def main() -> None:
                     )
                     narration_info["sidebyside_narrated_path"] = str(side_narrated)
                     print(f"  wrote {side_narrated}")
+
+            if not args.skip_speech_eval:
+                try:
+                    from suturing_pipeline.audio.speech_eval import (
+                        compute_speech_eval_block,
+                    )
+
+                    _se_dev = (
+                        args.device
+                        if args.speech_eval_device == "auto"
+                        else args.speech_eval_device
+                    )
+                    speech_eval_speech = compute_speech_eval_block(
+                        narration_segments,
+                        audio_path,
+                        device=_se_dev,
+                    )
+                    print(
+                        "  speech evaluation: "
+                        f"WER={speech_eval_speech.get('wer')}"
+                    )
+                except Exception as _se:
+                    print(f"  WARN: speech evaluation failed: {_se}")
+                    speech_eval_speech = {
+                        "wer": None,
+                        "accuracy": None,
+                        "summary_quality": None,
+                        "eval_error": str(_se)[:500],
+                    }
         except Exception as e:
             narration_failure = str(e)
             narration_info["error"] = narration_failure
@@ -983,6 +1030,10 @@ def main() -> None:
             if not args.allow_narration_failure:
                 raise
 
+    eval_meta: Dict[str, object] = {}
+    if speech_eval_speech is not None:
+        eval_meta["speech"] = speech_eval_speech
+
     metadata = {
         "checkpoint": str(ckpt_path.resolve()),
         "args": vars(args),
@@ -1022,6 +1073,8 @@ def main() -> None:
         "compare": compare_info,
         "frames": per_frame_records,
     }
+    if eval_meta:
+        metadata["eval"] = eval_meta
     meta_path = out_dir / "metadata.json"
     meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print(f"Wrote {meta_path}")

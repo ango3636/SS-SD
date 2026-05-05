@@ -18,6 +18,7 @@ streamlit
 imageio-ffmpeg
 moviepy>=2.0.0
 librosa
+jiwer
 ultralytics
 pytest
 google-api-python-client

@@ -32,9 +32,23 @@ if str(_SRC) not in sys.path:
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from suturing_pipeline.audio.narration_templates import GESTURE_DESCRIPTIONS  # noqa: E402
 from suturing_pipeline.data.data_utils import parse_metafile  # noqa: E402
 
 from video_quality_metrics import compute_metrics_board  # noqa: E402
+
+# JIGSAWS gesture codes where the canonical description names a hand or side.
+_GESTURE_SIDE_PREFIX: Dict[str, str] = {
+    "G1": "Right",
+    "G4": "Both",
+    "G6": "Left",
+    "G7": "Right",
+    "G9": "Right",
+    "G12": "Left",
+    "G13": "Left",
+    "G14": "Right",
+    "G15": "Right",
+}
 
 
 def _render_narration_downloads(run_dir: Path, key_prefix: str) -> None:
@@ -683,9 +697,11 @@ def run_generation(
 
 def render_video(path: Path, caption: str, keep_audio: bool = False) -> None:
     if not path.exists() or path.stat().st_size < 1024:
-        st.warning(f"{caption}: not produced (`{path.name}` missing or tiny).")
+        miss = caption or path.name
+        st.warning(f"{miss}: not produced (`{path.name}` missing or tiny).")
         return
-    st.caption(caption)
+    if caption:
+        st.caption(caption)
     h264_path, err = transcode_generated_to_h264(
         str(path),
         path.stat().st_mtime_ns,
@@ -707,6 +723,109 @@ def render_video(path: Path, caption: str, keep_audio: bool = False) -> None:
             )
         return
     st.video(h264_path)
+
+
+def _invert_gesture_to_int(gesture_to_int: object) -> Dict[int, str]:
+    if not isinstance(gesture_to_int, dict):
+        return {}
+    out: Dict[int, str] = {}
+    for k, v in gesture_to_int.items():
+        try:
+            out[int(v)] = str(k)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _normalize_frame_gesture(
+    fr: Dict[str, object], int_to_gesture: Dict[int, str]
+) -> str:
+    g = fr.get("gesture")
+    if g is not None and str(g).strip():
+        return str(g).strip()
+    gi = fr.get("gesture_int")
+    if gi is not None:
+        try:
+            ig = int(gi)
+            if ig in int_to_gesture:
+                return int_to_gesture[ig]
+        except (TypeError, ValueError):
+            pass
+    return "G?"
+
+
+def _format_gesture_transcription_line(gesture_code: str) -> str:
+    desc = GESTURE_DESCRIPTIONS.get(gesture_code, "")
+    if not desc:
+        desc = "Unknown gesture label in this run."
+    side = _GESTURE_SIDE_PREFIX.get(gesture_code, "")
+    if side == "Both":
+        return f"Both **{gesture_code}:** {desc}"
+    if side:
+        return f"{side} **{gesture_code}:** {desc}"
+    return f"**{gesture_code}:** {desc}"
+
+
+def _collapse_gesture_segments(
+    frames: List[Dict[str, object]],
+    int_to_gesture: Dict[int, str],
+    fps: float,
+) -> List[Tuple[float, float, str]]:
+    if fps <= 0 or not frames:
+        return []
+    ordered = sorted(frames, key=lambda f: int(f.get("output_index", 0)))
+    out: List[Tuple[float, float, str]] = []
+    run_start_idx = int(ordered[0].get("output_index", 0))
+    run_g = _normalize_frame_gesture(ordered[0], int_to_gesture)
+    prev_idx = run_start_idx
+    for fr in ordered[1:]:
+        idx = int(fr.get("output_index", 0))
+        g = _normalize_frame_gesture(fr, int_to_gesture)
+        if g != run_g or idx != prev_idx + 1:
+            out.append((run_start_idx / fps, (prev_idx + 1) / fps, run_g))
+            run_start_idx = idx
+            run_g = g
+        prev_idx = idx
+    out.append((run_start_idx / fps, (prev_idx + 1) / fps, run_g))
+    return out
+
+
+def render_gesture_transcription_timeline(
+    meta: Optional[Dict[str, object]], fps_fallback: float
+) -> None:
+    """Show time-aligned gesture labels from ``metadata.json`` ``frames``."""
+    if not isinstance(meta, dict):
+        return
+    frames_obj = meta.get("frames")
+    if not isinstance(frames_obj, list) or not frames_obj:
+        return
+    frames = [f for f in frames_obj if isinstance(f, dict)]
+    if not frames:
+        return
+    int_to_gesture = _invert_gesture_to_int(meta.get("gesture_to_int"))
+    fps = fps_fallback
+    args_obj = meta.get("args")
+    if isinstance(args_obj, dict):
+        try:
+            fps = float(args_obj.get("fps_out", fps_fallback))
+        except (TypeError, ValueError):
+            fps = fps_fallback
+    if fps <= 0:
+        fps = fps_fallback
+    segments = _collapse_gesture_segments(frames, int_to_gesture, fps)
+    if not segments:
+        return
+    st.markdown("**Gesture transcription**")
+    st.caption(
+        "Expert transcription segments mapped onto this clip. "
+        "Left / Right / Both follow the standard gesture wording when it "
+        "names a hand or needle path; otherwise only the gesture code is prefixed."
+    )
+    lines = []
+    for t0, t1, g in segments:
+        line = _format_gesture_transcription_line(g)
+        lines.append(f"- `{_fmt_mmss(t0)}`–`{_fmt_mmss(t1)}` — {line}")
+    st.markdown("\n".join(lines))
 
 
 @st.cache_data(show_spinner=False, ttl=15)
@@ -804,13 +923,20 @@ def render_previous_run(run_info: Dict[str, object], fps_hint: float) -> None:
 
     sub_a, sub_b = st.columns(2)
     with sub_a:
-        render_video(real_path, "Real (resampled)")
+        st.markdown("**Raw**")
+        render_video(real_path, "")
     with sub_b:
+        st.markdown("**Generated**")
         render_video(
             selected_gen,
-            "Generated + narration" if gen_has_audio else "Generated",
+            "",
             keep_audio=gen_has_audio,
         )
+
+    render_gesture_transcription_timeline(
+        meta if isinstance(meta, dict) else None,
+        float(fps_hint),
+    )
 
     try:
         render_evaluation_metrics_tabs(
@@ -1170,12 +1296,17 @@ def _render_narration_generation_tab(meta: Optional[dict]) -> None:
 
     st.markdown("**Speech evaluation**")
     st.caption(
-        "Optional fields under `eval.speech` in `metadata.json` (WER, "
-        "accuracy, summary quality) — for ASR, rubric scores, or human study."
+        "WER is filled automatically when you generate with narration (Whisper-tiny "
+        "ASR vs intended script), unless you pass `--skip_speech_eval`. "
+        "Accuracy and summary quality are still optional human rubrics — "
+        "see `docs/speech_eval_rubric.md`."
     )
     speech_wer = _nested_dict_get(meta, "eval", "speech", "wer")
     speech_acc = _nested_dict_get(meta, "eval", "speech", "accuracy")
     speech_sum = _nested_dict_get(meta, "eval", "speech", "summary_quality")
+    speech_err = _nested_dict_get(meta, "eval", "speech", "eval_error")
+    if speech_err:
+        st.warning(f"Automatic speech metrics failed: {speech_err}")
     s1, s2, s3 = st.columns(3)
     s1.metric(
         "Speech: WER",
@@ -1761,13 +1892,20 @@ def main() -> None:
 
             sub_a, sub_b = st.columns(2)
             with sub_a:
-                render_video(real_path, "Real (resampled)")
+                st.markdown("**Raw**")
+                render_video(real_path, "")
             with sub_b:
+                st.markdown("**Generated**")
                 render_video(
                     selected_gen,
-                    "Generated + narration" if gen_has_audio else "Generated",
+                    "",
                     keep_audio=gen_has_audio,
                 )
+
+            render_gesture_transcription_timeline(
+                meta if isinstance(meta, dict) else None,
+                float(fps_out),
+            )
 
             render_evaluation_metrics_tabs(
                 real_path,

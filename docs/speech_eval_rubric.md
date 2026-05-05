@@ -14,7 +14,7 @@ The UI reads optional nested keys (see [JSON fields](#json-fields-metadatajson))
 }
 ```
 
-Nothing in the generator fills `eval` today—you add values after **automatic** scoring (WER) and/or **human** scoring (accuracy, summary quality).
+`generate_eval_video.py` fills **`eval.speech.wer`** automatically when narration succeeds: it runs **Whisper-tiny** ASR on `narration_track.m4a` and compares to the intended script (same policy as “Intended script” below). Use `--skip_speech_eval` to skip. **Accuracy** and **summary quality** remain for **human** scoring unless you extend the pipeline.
 
 ---
 
