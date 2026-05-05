@@ -86,3 +86,9 @@ python scripts/generate_eval_video.py --help
 - `--compare` — separate path that builds a **shared** narration bundle for dual-video comparison (see `generate_eval_video.py` and `compositor.py`).
 
 For behaviour of individual functions, see docstrings in the modules listed above.
+
+---
+
+## Speech evaluation (WER, accuracy, summary quality)
+
+To define human rubrics, automatic WER protocol, and the `eval.speech` fields read by Streamlit, see **[speech_eval_rubric.md](speech_eval_rubric.md)**.
