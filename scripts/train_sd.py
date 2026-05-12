@@ -1,9 +1,11 @@
 """Train a Stable Diffusion model conditioned on JIGSAWS Suturing kinematics.
 
-The CLIP text encoder is replaced entirely by a learned
+The CLIP text encoder is replaced by a learned
 :class:`~suturing_pipeline.synthesis.kinematic_encoder.KinematicEncoder`
-that projects 76-dim kinematic vectors + gesture labels into the U-Net's
-cross-attention space.
+that projects kinematic vectors + gesture labels into the U-Net's
+cross-attention space.  Optional **learnable semantic tokens** and a
+**CLIP-derived scene token** (from ``--clip_scene_prompt``) extend conditioning
+for non-kinematic scene content.
 
 Only the JIGSAWS ``suturing`` task is supported — kinematics for the other
 JIGSAWS tasks are not available in this project.
@@ -14,6 +16,10 @@ Supports two training modes:
   cross-attention projection layers (recommended, ~1 % trainable params).
 * **full** — unfreeze all cross-attention ``to_k`` / ``to_v`` projections
   while keeping the rest of the U-Net frozen.
+
+Optional **temporal delta loss** (``--temporal_delta_weight``): each batch item
+is two frames from the same trial; we add λ·L1(pred Δ latent − clean Δ latent)
+at the same DDPM timestep to encourage motion-consistent latents across time.
 
 Example::
 
@@ -42,7 +48,10 @@ from tqdm import tqdm
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from suturing_pipeline.data.jigsaws_dataset import JIGSAWSDataset
-from suturing_pipeline.synthesis.kinematic_encoder import KinematicEncoder
+from suturing_pipeline.synthesis.kinematic_encoder import (
+    KinematicEncoder,
+    encode_clip_scene_embedding,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -60,7 +69,11 @@ def _parse_args() -> argparse.Namespace:
         "If omitted, the first available fold is used.",
     )
     p.add_argument("--itr", type=int, default=1)
-    p.add_argument("--expert_only", action="store_true")
+    p.add_argument(
+        "--expert_only",
+        action="store_true",
+        help="Keep only trials with self-reported expert (meta file col 2, 1-based N/I/E).",
+    )
     p.add_argument("--image_size", type=int, default=256)
     p.add_argument("--capture", type=int, default=1, choices=[1, 2])
     p.add_argument(
@@ -99,7 +112,58 @@ def _parse_args() -> argparse.Namespace:
         help="Override device (e.g. 'cuda', 'mps', 'cpu').",
     )
     p.add_argument("--num_workers", type=int, default=2)
+    p.add_argument(
+        "--append_motion_features",
+        action="store_true",
+        help="Append per-frame velocity / acceleration / jerk (4 values) to each "
+        "raw 76-dim kinematics row (80-dim input).",
+    )
+    p.add_argument(
+        "--num_semantic_tokens",
+        type=int,
+        default=0,
+        help="Learnable soft-prompt tokens concatenated to cross-attention for "
+        "non-kinematic scene context (0 = disabled).",
+    )
+    p.add_argument(
+        "--clip_scene_prompt",
+        default=None,
+        help="Optional. Frozen CLIP text-encoder embedding of this string; one "
+        "projected token is concatenated after kinematic + semantic tokens. "
+        "Example: 'robotic laparoscopic suturing with needle and suture thread'.",
+    )
+    p.add_argument(
+        "--temporal_delta_weight",
+        type=float,
+        default=0.0,
+        help="If > 0, each batch item is two frames from the same trial; adds "
+        "λ · L1(pred Δ latent − clean Δ latent) alongside noise MSE (same DDPM "
+        "timestep per pair). Use ~0.05–0.5 to start; reduces long-clip drift.",
+    )
+    p.add_argument(
+        "--temporal_pair_gap",
+        type=int,
+        default=1,
+        help="Frame-index gap between paired frames when --temporal_delta_weight "
+        "> 0 (1 = consecutive frames).",
+    )
     return p.parse_args()
+
+
+def _predict_original_from_epsilon(
+    noisy_latents: torch.Tensor,
+    noise_pred: torch.Tensor,
+    timesteps: torch.Tensor,
+    scheduler,
+) -> torch.Tensor:
+    """Map epsilon prediction to predicted clean latent x₀ (DDPM, epsilon loss)."""
+    ac = scheduler.alphas_cumprod.to(
+        device=noisy_latents.device, dtype=noisy_latents.dtype
+    )[timesteps]
+    ac = ac.reshape(-1, 1, 1, 1).clamp(min=1e-9)
+    sqrt_ac = ac.sqrt()
+    sqrt_one_minus = (1.0 - ac).sqrt()
+    return (noisy_latents - sqrt_one_minus * noise_pred) / sqrt_ac.clamp(min=1e-8)
 
 
 def _resolve_device(requested: str | None) -> torch.device:
@@ -109,10 +173,9 @@ def _resolve_device(requested: str | None) -> torch.device:
             raise RuntimeError(
                 "CUDA was requested (--device cuda) but this PyTorch build has no CUDA. "
                 "In Colab: Runtime → Change runtime type → GPU, then Runtime → Restart session "
-                "and run all cells. If you already use a GPU runtime, reinstall CUDA PyTorch "
-                "before other packages, e.g.\n"
-                "  pip install torch torchvision --index-url "
-                "https://download.pytorch.org/whl/cu124"
+                "and run all cells. Prefer Colab's preinstalled torch; avoid overwriting it with "
+                "the wrong CUDA wheel (cu124 vs cu128). If you must reinstall, pick the wheel "
+                "matching your runtime from https://pytorch.org/get-started/locally/"
             )
         return dev
     if torch.cuda.is_available():
@@ -164,6 +227,7 @@ def _save_checkpoint(
 
 def main() -> None:
     args = _parse_args()
+    use_temporal = float(args.temporal_delta_weight) > 0.0
     device = _resolve_device(args.device)
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -184,6 +248,13 @@ def main() -> None:
         args.model_id, subfolder="scheduler"
     )
     print("SD components loaded.", flush=True)
+
+    pred_type = getattr(noise_scheduler.config, "prediction_type", None) or "epsilon"
+    if use_temporal and str(pred_type).lower() != "epsilon":
+        raise RuntimeError(
+            f"--temporal_delta_weight requires epsilon prediction_type; "
+            f"this scheduler has {pred_type!r}."
+        )
 
     vae.to(device)
     unet.to(device)
@@ -218,6 +289,12 @@ def main() -> None:
 
     # -- dataset ---------------------------------------------------------------
     print("Building dataset ... (may be slow when reading from Google Drive)", flush=True)
+    if use_temporal:
+        print(
+            f"  temporal_delta_weight={args.temporal_delta_weight} "
+            f"(pair_gap={args.temporal_pair_gap}) — frame pairs enabled",
+            flush=True,
+        )
     dataset = JIGSAWSDataset(
         data_root=args.data_root,
         split="train",
@@ -230,6 +307,9 @@ def main() -> None:
         image_size=args.image_size,
         capture=args.capture,
         frame_stride=args.frame_stride,
+        append_motion_features=args.append_motion_features,
+        temporal_pairs=use_temporal,
+        temporal_pair_gap=args.temporal_pair_gap,
     )
     loader = DataLoader(
         dataset,
@@ -239,7 +319,11 @@ def main() -> None:
         pin_memory=device.type == "cuda",
         drop_last=True,
     )
-    print(f"  {len(dataset)} frames, {len(loader)} batches/epoch", flush=True)
+    print(
+        f"  {len(dataset)} {'pairs' if use_temporal else 'frames'}, "
+        f"{len(loader)} batches/epoch",
+        flush=True,
+    )
 
     # Serialise scaler params for checkpoint
     scaler_params = {
@@ -248,11 +332,23 @@ def main() -> None:
     }
 
     # -- kinematic encoder -----------------------------------------------------
+    kin_dim = dataset._kinematics[0].shape[1] if dataset._kinematics else 76
+    clip_feat = None
+    if args.clip_scene_prompt:
+        print("Encoding --clip_scene_prompt with CLIP text encoder (CPU) ...")
+        clip_feat = encode_clip_scene_embedding(
+            args.model_id,
+            args.clip_scene_prompt,
+            device=torch.device("cpu"),
+        )
+
     encoder = KinematicEncoder(
-        kin_dim=dataset._kinematics[0].shape[1] if dataset._kinematics else 76,
+        kin_dim=kin_dim,
         num_gestures=max(dataset.num_gestures, 1),
         seq_len=77,
         embed_dim=cross_attn_dim,
+        num_semantic_tokens=args.num_semantic_tokens,
+        clip_scene_feature=clip_feat,
     ).to(device)
 
     # -- optimizer (encoder + unfrozen U-Net params) ---------------------------
@@ -276,33 +372,82 @@ def main() -> None:
         pbar = tqdm(loader, desc=f"Epoch {epoch + 1}/{args.epochs}")
 
         for batch_idx, (frames, kin, gestures) in enumerate(pbar):
-            frames = frames.to(device)       # [B, 3, H, W] in [-1, 1]
-            kin = kin.to(device)              # [B, 76]
-            gestures = gestures.to(device)    # [B]
+            frames = frames.to(device)
+            kin = kin.to(device)
+            gestures = gestures.to(device)
 
-            # VAE encode -> latent
-            with torch.no_grad():
-                latents = vae.encode(frames).latent_dist.sample() * vae_scale
+            if use_temporal:
+                # Paired clips: [B, 2, 3, H, W], same DDPM t per pair.
+                b, two, c_img, h_img, w_img = frames.shape
+                if two != 2:
+                    raise RuntimeError(f"Expected temporal batch dim 2, got {two}")
+                frames_flat = frames.reshape(b * 2, c_img, h_img, w_img)
+                kin_flat = kin.reshape(b * 2, -1)
+                gestures_flat = gestures.reshape(b * 2)
 
-            # Forward diffusion: add noise
-            noise = torch.randn_like(latents)
-            timesteps = torch.randint(
-                0,
-                noise_scheduler.config.num_train_timesteps,
-                (latents.shape[0],),
-                device=device,
-            ).long()
-            noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+                with torch.no_grad():
+                    latents = vae.encode(frames_flat).latent_dist.sample() * vae_scale
 
-            # Kinematic conditioning
-            encoder_hidden_states = encoder(kin, gestures)
+                noise = torch.randn_like(latents)
+                timesteps_pair = torch.randint(
+                    0,
+                    noise_scheduler.config.num_train_timesteps,
+                    (b,),
+                    device=device,
+                ).long()
+                timesteps = timesteps_pair.repeat_interleave(2)
+                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
-            # Predict noise
-            noise_pred = unet(
-                noisy_latents, timesteps, encoder_hidden_states=encoder_hidden_states
-            ).sample
+                encoder_hidden_states = encoder(kin_flat, gestures_flat)
+                noise_pred = unet(
+                    noisy_latents,
+                    timesteps,
+                    encoder_hidden_states=encoder_hidden_states,
+                ).sample
 
-            loss = F.mse_loss(noise_pred, noise)
+                loss_eps = F.mse_loss(noise_pred, noise)
+
+                pred_x0 = _predict_original_from_epsilon(
+                    noisy_latents, noise_pred, timesteps, noise_scheduler
+                )
+                pred_x0_paired = pred_x0.view(b, 2, *pred_x0.shape[1:])
+                clean_paired = latents.view(b, 2, *latents.shape[1:])
+                delta_pred = pred_x0_paired[:, 1] - pred_x0_paired[:, 0]
+                delta_clean = clean_paired[:, 1] - clean_paired[:, 0]
+                loss_temp = F.l1_loss(delta_pred, delta_clean)
+
+                loss = loss_eps + float(args.temporal_delta_weight) * loss_temp
+                lt_val = loss_temp.item()
+            else:
+                # Single-frame batch: [B, 3, H, W]
+                if frames.dim() != 4:
+                    raise RuntimeError(
+                        "Expected single-frame tensors [B,3,H,W]; "
+                        "disable --temporal_delta_weight or fix the dataset."
+                    )
+
+                # VAE encode -> latent
+                with torch.no_grad():
+                    latents = vae.encode(frames).latent_dist.sample() * vae_scale
+
+                # Forward diffusion: add noise
+                noise = torch.randn_like(latents)
+                timesteps = torch.randint(
+                    0,
+                    noise_scheduler.config.num_train_timesteps,
+                    (latents.shape[0],),
+                    device=device,
+                ).long()
+                noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+
+                encoder_hidden_states = encoder(kin, gestures)
+
+                noise_pred = unet(
+                    noisy_latents, timesteps, encoder_hidden_states=encoder_hidden_states
+                ).sample
+
+                loss = F.mse_loss(noise_pred, noise)
+                lt_val = None
 
             loss = loss / args.gradient_accumulation_steps
             loss.backward()
@@ -326,10 +471,13 @@ def main() -> None:
                     )
 
             epoch_loss += loss.item() * args.gradient_accumulation_steps
-            pbar.set_postfix(
-                loss=f"{loss.item() * args.gradient_accumulation_steps:.4f}",
-                step=global_step,
-            )
+            postfix: dict = {
+                "loss": f"{loss.item() * args.gradient_accumulation_steps:.4f}",
+                "step": global_step,
+            }
+            if lt_val is not None:
+                postfix["L1_Δ"] = f"{lt_val:.4f}"
+            pbar.set_postfix(**postfix)
 
         avg = epoch_loss / max(len(loader), 1)
         print(f"  Epoch {epoch + 1} avg loss: {avg:.5f}", flush=True)

@@ -10,6 +10,9 @@ sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
 from suturing_pipeline.config import ensure_output_dirs, load_config
 from suturing_pipeline.data.alignment import read_kinematics_file
+from suturing_pipeline.data.jigsaws_kinematics_layout import (
+    TRANSLATIONAL_VELOCITY_COL_INDICES,
+)
 from suturing_pipeline.kinematics.features import compute_kinematic_features
 
 
@@ -31,7 +34,9 @@ def main() -> None:
         raise ValueError("No kinematics file provided/found.")
 
     kin_df = read_kinematics_file(kin_path)
-    col_spec = cfg.kinematics.get("translational_velocity_cols", [13, 14, 15])
+    col_spec = cfg.kinematics.get(
+        "translational_velocity_cols", TRANSLATIONAL_VELOCITY_COL_INDICES
+    )
     cols = [int(c) for c in col_spec]
 
     features_df = compute_kinematic_features(

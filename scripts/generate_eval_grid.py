@@ -59,8 +59,9 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--expert_only",
         action="store_true",
-        help="Restrict test split to expert trials.  By default the test "
-        "split includes all skill levels present in the fold.",
+        help="Restrict test split to self-reported expert trials (meta file "
+        "column 2, 1-based; not GRS). By default the test split includes all "
+        "skill levels present in the fold.",
     )
 
     # Sampling
@@ -228,7 +229,7 @@ def main() -> None:
     held_out = args.held_out if args.held_out is not None else saved.get("held_out")
     itr = args.itr if args.itr is not None else saved.get("itr", 1)
     capture = args.capture if args.capture is not None else saved.get("capture", 1)
-
+    append_motion = bool(saved.get("append_motion_features", False))
     ckpt_gesture_to_int: Dict[str, int] = ckpt.get("gesture_to_int", {}) or {}
     if not ckpt_gesture_to_int:
         raise RuntimeError(
@@ -268,6 +269,7 @@ def main() -> None:
             image_size=args.image_size,
             capture=capture,
             frame_stride=args.frame_stride,
+            append_motion_features=append_motion,
         )
     except RuntimeError as e:
         raise SystemExit(

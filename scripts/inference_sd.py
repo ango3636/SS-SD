@@ -60,11 +60,25 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--image_size", type=int, default=256)
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--device", default=None)
+    p.add_argument(
+        "--or_ambience",
+        action="store_true",
+        help=(
+            "No effect for single-frame inference. For AudioGen OR ambience under "
+            "Bark, run scripts/generate_eval_video.py with --enable_narration "
+            "and this same flag."
+        ),
+    )
     return p.parse_args()
 
 
 def main() -> None:
     args = _parse_args()
+    if getattr(args, "or_ambience", False):
+        print(
+            "Note: --or_ambience is ignored here (no audio track). "
+            "Use scripts/generate_eval_video.py --enable_narration --or_ambience."
+        )
 
     sampler = SDSampler(
         checkpoint_path=args.checkpoint,
@@ -74,7 +88,14 @@ def main() -> None:
     )
     print(f"Loaded SD on device: {sampler.device}")
 
+    append_motion = bool(sampler.saved_args.get("append_motion_features", False))
     kin_all = parse_kinematics(args.kinematics_file)
+    if append_motion:
+        from suturing_pipeline.kinematics.motion_columns import (
+            append_motion_columns,
+        )
+
+        kin_all = append_motion_columns(kin_all)
     if args.frame_index >= len(kin_all):
         raise IndexError(
             f"frame_index {args.frame_index} out of range "

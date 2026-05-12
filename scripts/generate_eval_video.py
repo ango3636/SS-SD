@@ -23,7 +23,11 @@ The SD model was trained with ``frame_stride=90`` on a single frame per
 step; it has no explicit temporal-consistency term, so expect flicker
 between adjacent generated frames.  Using ``--fixed_seed`` (default)
 re-uses the same noise latent for every frame, which empirically gives
-the most coherent output under these constraints.
+the most coherent output under these constraints.  For long clips,
+chaining ``--anchor_mode prev_gen`` or ``flow_warp`` can still drift or
+smear; use ``--anchor_reset_every N`` to periodically drop the anchor
+and resample from noise (reduces compound error, at the cost of rarer
+sharp transitions).
 
 Example
 -------
@@ -40,6 +44,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
 import sys
 import time
@@ -52,12 +57,26 @@ import torch
 
 sys.path.append(str(Path(__file__).resolve().parents[1] / "src"))
 
+from suturing_pipeline.audio.compositor import (
+    generate_shared_audio_track,
+    mux_audio_to_generated_video,
+    mux_audio_to_raw_video,
+    side_by_side_comparison,
+)
+from suturing_pipeline.audio.llm_narration import apply_llm_narration_to_segments
 from suturing_pipeline.audio.narration_templates import (
     build_expert_speed_stats,
     build_narration_payload,
     collapse_frame_records,
+    kinematics_segment_to_jsonable,
+    write_narration_transcript,
 )
-from suturing_pipeline.audio.tts import mux_audio_to_video, synthesize_narration_audio
+from suturing_pipeline.audio.tts import (
+    DEFAULT_VOICE_PRESET,
+    BarkTTSConverter,
+    mux_audio_to_video,
+    synthesize_narration_audio,
+)
 from suturing_pipeline.data.jigsaws_dataset import JIGSAWSDataset
 from suturing_pipeline.synthesis.sd_sampler import SDSampler
 
@@ -92,7 +111,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--expert_only",
         action="store_true",
-        help="Restrict to expert trials (metafile skill == Expert).",
+        help=(
+            "Restrict to expert trials: meta file column 2 (1-based), "
+            "self-reported E — not the GRS column. See jigsaws_metafile_layout."
+        ),
     )
     p.add_argument(
         "--dataset_split",
@@ -175,13 +197,24 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--tts_provider",
-        default="gtts",
-        help="TTS backend (currently: gtts).",
+        default="bark",
+        help="TTS backend (currently: bark).",
     )
     p.add_argument(
         "--tts_voice",
-        default="en",
-        help="Voice/language code for the TTS backend.",
+        default=DEFAULT_VOICE_PRESET,
+        help=(
+            "Bark voice preset, e.g. 'v2/en_speaker_9' (default) or "
+            "'v2/en_speaker_6' (alternate clinical tone)."
+        ),
+    )
+    p.add_argument(
+        "--voice_preset",
+        default=None,
+        help=(
+            "Alias for --tts_voice, also used by --compare for the shared "
+            "Bark narration track."
+        ),
     )
     p.add_argument(
         "--narration_min_segment_sec",
@@ -223,6 +256,114 @@ def _parse_args() -> argparse.Namespace:
             "do not look like success."
         ),
     )
+    p.add_argument(
+        "--or_ambience",
+        action="store_true",
+        help=(
+            "Mix facebook/audiogen-medium OR ambience under Bark per gesture "
+            "segment (-18 dB). Requires audiocraft when narration or --compare "
+            "audio is produced."
+        ),
+    )
+    p.add_argument(
+        "--foley_dir",
+        default=None,
+        help=(
+            "Optional directory of mono WAV files named G1.wav … G15.wav "
+            "(case-insensitive stem). Each file is mixed per matching "
+            "narration segment at --foley_gain_db (default -12 dB), aligned "
+            "with --foley_align. Missing gestures are skipped. For two layers "
+            "on the same label, add Gn_L.wav and Gn_R.wav. For two gesture "
+            "classes in one segment, set foley_gestures or foley_gesture_right "
+            "in narration_segments.json before synthesis."
+        ),
+    )
+    p.add_argument(
+        "--foley_gain_db",
+        type=float,
+        default=-12.0,
+        help="Linear mix level for WAV foley relative to the segment stem (voice + optional ambience).",
+    )
+    p.add_argument(
+        "--foley_align",
+        choices=["start", "center"],
+        default="start",
+        help="Where to place each foley clip within the stretched segment duration.",
+    )
+    p.add_argument(
+        "--narration_backend",
+        choices=["template", "ollama", "huggingface", "hf"],
+        default="template",
+        help=(
+            "How to produce spoken lines before Bark: 'template' (deterministic "
+            "kinematic text), 'ollama' (free local LLM, install Ollama), or "
+            "'huggingface' / 'hf' (HF Inference API; set HF_TOKEN or --hf_token)."
+        ),
+    )
+    p.add_argument(
+        "--ollama_base_url",
+        default="http://127.0.0.1:11434",
+        help="Ollama server URL when --narration_backend ollama.",
+    )
+    p.add_argument(
+        "--ollama_model",
+        default="llama3.2",
+        help="Ollama model tag (e.g. llama3.2, mistral, qwen2.5:7b).",
+    )
+    p.add_argument(
+        "--hf_narration_model",
+        default="meta-llama/Llama-3.2-1B-Instruct",
+        help=(
+            "HF model id for router /v1/chat/completions. Gated models require accepting "
+            "the license on the Hub. See https://huggingface.co/inference/models"
+        ),
+    )
+    p.add_argument(
+        "--hf_token",
+        default=None,
+        help="Hugging Face read token (optional if HF_TOKEN is set in the environment).",
+    )
+    p.add_argument(
+        "--narration_llm_timeout_sec",
+        type=float,
+        default=120.0,
+        help="Per-segment HTTP timeout when calling Ollama or Hugging Face.",
+    )
+    p.add_argument(
+        "--skip_speech_eval",
+        action="store_true",
+        help=(
+            "When narration is enabled, skip Whisper ASR and WER under "
+            "metadata eval.speech (faster; no model download)."
+        ),
+    )
+    p.add_argument(
+        "--speech_eval_device",
+        default="cpu",
+        choices=["cpu", "cuda", "mps", "auto"],
+        help=(
+            "Torch device for Whisper ASR. Default cpu avoids competing with SD "
+            "for GPU memory in this process. Use auto to match --device."
+        ),
+    )
+    p.add_argument(
+        "--compare",
+        action="store_true",
+        help=(
+            "Produce the dual-audio comparison bundle: a shared Bark "
+            "narration WAV muxed independently onto the original "
+            "JIGSAWS .avi AND the generated video, plus a labeled "
+            "side-by-side comparison MP4. Requires --raw_data_root."
+        ),
+    )
+    p.add_argument(
+        "--raw_data_root",
+        default=None,
+        help=(
+            "Path to the JIGSAWS data root used for the raw .avi in "
+            "--compare. Defaults to --data_root when omitted."
+        ),
+    )
 
     # Temporal anchoring (Tier-1 coherence controls).
     p.add_argument(
@@ -247,6 +388,17 @@ def _parse_args() -> argparse.Namespace:
             "Fraction of the DDIM schedule to run when anchoring "
             "(1.0 == pure noise, no anchor effect; 0.5-0.75 = strong "
             "temporal coherence; too low freezes motion)."
+        ),
+    )
+    p.add_argument(
+        "--anchor_reset_every",
+        type=int,
+        default=0,
+        help=(
+            "If > 0, skip temporal anchoring every N output frames (1-based "
+            "count within this clip). Reduces long-horizon drift when "
+            "chaining prev_gen/flow_warp, at the cost of occasional sharper "
+            "transitions. 0 = never reset (default)."
         ),
     )
     return p.parse_args()
@@ -353,6 +505,7 @@ def main() -> None:
     held_out = args.held_out if args.held_out is not None else saved.get("held_out")
     itr = args.itr if args.itr is not None else saved.get("itr", 1)
     capture = args.capture if args.capture is not None else saved.get("capture", 1)
+    append_motion = bool(saved.get("append_motion_features", False))
 
     ckpt_gesture_to_int: Dict[str, int] = ckpt.get("gesture_to_int", {}) or {}
     if not ckpt_gesture_to_int:
@@ -366,6 +519,32 @@ def main() -> None:
     out_dir = Path(args.output_dir) / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"Output dir: {out_dir}")
+    if args.or_ambience and not args.enable_narration and not args.compare:
+        print(
+            "WARN: --or_ambience only applies when narration audio is built "
+            "(--enable_narration or --compare); it has no effect on this run."
+        )
+    if (
+        args.narration_backend != "template"
+        and not args.enable_narration
+        and not args.compare
+    ):
+        print(
+            "WARN: --narration_backend is only used when narration audio is built "
+            "(--enable_narration or --compare); template text is unused this run."
+        )
+    if (
+        args.narration_backend == "ollama"
+        and os.environ.get("COLAB_RELEASE_TAG")
+    ):
+        print(
+            "NOTE (Google Colab): Ollama defaults to http://127.0.0.1:11434 on *this* "
+            "runtime (the Colab VM). A Cloudflare tunnel only exposes web pages to "
+            "your browser; it does not route urllib from this Python process to "
+            "Ollama on your home machine. Options: install/run Ollama inside Colab "
+            "(heavy), or use --narration_backend huggingface with HF_TOKEN / "
+            "--hf_token, or keep --narration_backend template."
+        )
 
     print(
         f"Building dataset | split={args.dataset_split} split_type={split_type} "
@@ -385,6 +564,7 @@ def main() -> None:
             image_size=args.image_size,
             capture=capture,
             frame_stride=1,
+            append_motion_features=append_motion,
         )
     except RuntimeError as e:
         raise SystemExit(
@@ -507,7 +687,11 @@ def main() -> None:
             # --- choose anchor image for this frame ----------------------
             init_image: Optional[np.ndarray] = None
             anchor_used = "none"
-            if args.anchor_mode != "none" and prev_gen_rgb is not None:
+            reset_n = max(0, int(args.anchor_reset_every))
+            skip_anchor = reset_n > 0 and i > 0 and (i % reset_n == 0)
+            if skip_anchor:
+                anchor_used = "periodic_reset"
+            elif args.anchor_mode != "none" and prev_gen_rgb is not None:
                 if args.anchor_mode == "prev_gen":
                     init_image = prev_gen_rgb
                     anchor_used = "prev_gen"
@@ -587,6 +771,7 @@ def main() -> None:
 
     narration_info: Dict[str, object] = {"enabled": bool(args.enable_narration)}
     narration_failure: Optional[str] = None
+    speech_eval_speech: Optional[Dict[str, object]] = None
     if args.enable_narration:
         print("Building narration segments ...")
         expert_stats: Dict[str, Dict[str, float]] = {}
@@ -626,7 +811,22 @@ def main() -> None:
                     "summary": payload["summary"],
                     "narration_text": payload["narration_text"],
                     "gesture_description": payload["gesture_description"],
+                    "kinematics_values": kinematics_segment_to_jsonable(kin_segment),
                 }
+            )
+        if args.narration_backend != "template":
+            print(
+                f"  LLM narration ({args.narration_backend}): generating speech text, "
+                "then Bark TTS ..."
+            )
+            narration_segments = apply_llm_narration_to_segments(
+                narration_segments,
+                backend=args.narration_backend,
+                ollama_base_url=args.ollama_base_url,
+                ollama_model=args.ollama_model,
+                hf_model=args.hf_narration_model,
+                hf_token=args.hf_token,
+                timeout_sec=args.narration_llm_timeout_sec,
             )
         segments_path = out_dir / "narration_segments.json"
         segments_path.write_text(
@@ -634,15 +834,30 @@ def main() -> None:
         )
         print(f"  wrote {segments_path}")
 
+        transcript_path = out_dir / "narration_transcript.txt"
+        write_narration_transcript(narration_segments, transcript_path)
+        print(f"  wrote {transcript_path}")
+
         narration_info.update(
             {
                 "segments_path": str(segments_path),
+                "transcript_path": str(transcript_path),
                 "segment_count": len(narration_segments),
                 "tts_provider": args.tts_provider,
                 "tts_voice": args.tts_voice,
                 "used_empirical_stats": not args.disable_empirical_speed_stats,
+                "or_ambience": bool(args.or_ambience),
+                "foley_dir": args.foley_dir,
+                "foley_gain_db": float(args.foley_gain_db),
+                "foley_align": str(args.foley_align),
+                "narration_backend": args.narration_backend,
             }
         )
+        if args.foley_dir and not Path(args.foley_dir).expanduser().is_dir():
+            print(
+                f"  WARN: --foley_dir {args.foley_dir!r} is not a directory; "
+                "WAV foley will be skipped."
+            )
         try:
             audio_path = out_dir / "narration_track.m4a"
             tts_info = synthesize_narration_audio(
@@ -651,6 +866,10 @@ def main() -> None:
                 provider=args.tts_provider,
                 voice=args.tts_voice,
                 min_segment_seconds=args.narration_min_segment_sec,
+                or_ambience=args.or_ambience,
+                foley_dir=args.foley_dir,
+                foley_gain_db=float(args.foley_gain_db),
+                foley_align=args.foley_align,
             )
             narration_info["audio_path"] = str(audio_path)
             narration_info["tts"] = tts_info
@@ -699,10 +918,121 @@ def main() -> None:
                     )
                     narration_info["sidebyside_narrated_path"] = str(side_narrated)
                     print(f"  wrote {side_narrated}")
+
+            if not args.skip_speech_eval:
+                try:
+                    from suturing_pipeline.audio.speech_eval import (
+                        compute_speech_eval_block,
+                    )
+
+                    _se_dev = (
+                        args.device
+                        if args.speech_eval_device == "auto"
+                        else args.speech_eval_device
+                    )
+                    speech_eval_speech = compute_speech_eval_block(
+                        narration_segments,
+                        audio_path,
+                        device=_se_dev,
+                    )
+                    print(
+                        "  speech evaluation: "
+                        f"WER={speech_eval_speech.get('wer')}"
+                    )
+                except Exception as _se:
+                    print(f"  WARN: speech evaluation failed: {_se}")
+                    speech_eval_speech = {
+                        "wer": None,
+                        "accuracy": None,
+                        "summary_quality": None,
+                        "eval_error": str(_se)[:500],
+                    }
         except Exception as e:
             narration_failure = str(e)
             narration_info["error"] = narration_failure
             print(f"  WARN: narration synthesis/mux failed: {e}")
+
+    compare_info: Dict[str, object] = {"enabled": bool(args.compare)}
+    if args.compare:
+        raw_root = args.raw_data_root or args.data_root
+        voice_preset = args.voice_preset or args.tts_voice or DEFAULT_VOICE_PRESET
+        print(
+            f"[compare] generating shared Bark narration for {trial_name} "
+            f"(voice_preset={voice_preset}, raw_data_root={raw_root}) ..."
+        )
+        try:
+            wav_path = generate_shared_audio_track(
+                trial_name=trial_name,
+                task="suturing",
+                data_root=raw_root,
+                output_dir=out_dir,
+                voice_preset=voice_preset,
+                device=args.device,
+                or_ambience=args.or_ambience,
+                foley_dir=args.foley_dir,
+                foley_gain_db=float(args.foley_gain_db),
+                foley_align=str(args.foley_align),
+                narration_backend=args.narration_backend,
+                ollama_base_url=args.ollama_base_url,
+                ollama_model=args.ollama_model,
+                hf_narration_model=args.hf_narration_model,
+                hf_token=args.hf_token,
+                narration_llm_timeout_sec=args.narration_llm_timeout_sec,
+            )
+            print(f"[compare] wrote {wav_path}")
+
+            raw_narrated = mux_audio_to_raw_video(
+                trial_name=trial_name,
+                task="suturing",
+                data_root=raw_root,
+                audio_path=wav_path,
+                output_dir=out_dir,
+            )
+            print(f"[compare] wrote {raw_narrated}")
+
+            gen_narrated = mux_audio_to_generated_video(
+                generated_frames_dir=out_dir / "generated.mp4",
+                audio_path=wav_path,
+                trial_name=trial_name,
+                output_dir=out_dir,
+                fps_hint=float(args.fps_out),
+            )
+            print(f"[compare] wrote {gen_narrated}")
+
+            comparison_path = side_by_side_comparison(
+                raw_narrated_path=raw_narrated,
+                generated_narrated_path=gen_narrated,
+                output_path=out_dir / f"{trial_name}_comparison.mp4",
+            )
+            print(f"[compare] wrote {comparison_path}")
+
+            shared_seg_json = out_dir / f"{trial_name}_shared_narration_segments.json"
+            shared_tr_txt = out_dir / f"{trial_name}_shared_narration_transcript.txt"
+            compare_info.update(
+                {
+                    "voice_preset": voice_preset,
+                    "raw_data_root": str(raw_root),
+                    "narration_wav": wav_path,
+                    "raw_narrated_mp4": raw_narrated,
+                    "generated_narrated_mp4": gen_narrated,
+                    "comparison_mp4": comparison_path,
+                    "or_ambience": bool(args.or_ambience),
+                    "foley_dir": args.foley_dir,
+                    "foley_gain_db": float(args.foley_gain_db),
+                    "foley_align": str(args.foley_align),
+                    "shared_narration_segments_json": str(shared_seg_json),
+                    "shared_narration_transcript_txt": str(shared_tr_txt),
+                }
+            )
+        except Exception as e:
+            compare_info["error"] = str(e)
+            print(f"[compare] WARN: failed: {e}")
+            if not args.allow_narration_failure:
+                raise
+
+    eval_meta: Dict[str, object] = {}
+    if speech_eval_speech is not None:
+        eval_meta["speech"] = speech_eval_speech
 
     metadata = {
         "checkpoint": str(ckpt_path.resolve()),
@@ -729,6 +1059,7 @@ def main() -> None:
         "anchoring": {
             "mode": args.anchor_mode,
             "init_strength": float(args.init_strength),
+            "anchor_reset_every": int(max(0, args.anchor_reset_every)),
         },
         "rendered_frames": len(per_frame_records),
         "total_generation_seconds": round(total_gen_time, 2),
@@ -739,8 +1070,11 @@ def main() -> None:
         ),
         "gesture_to_int": ckpt_gesture_to_int,
         "narration": narration_info,
+        "compare": compare_info,
         "frames": per_frame_records,
     }
+    if eval_meta:
+        metadata["eval"] = eval_meta
     meta_path = out_dir / "metadata.json"
     meta_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print(f"Wrote {meta_path}")

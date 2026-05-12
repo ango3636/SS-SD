@@ -13,7 +13,7 @@ other JIGSAWS tasks are not available in this project.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 import cv2
 import numpy as np
@@ -28,6 +28,7 @@ from .data_utils import (
     parse_kinematics,
     parse_transcription,
 )
+from suturing_pipeline.kinematics.motion_columns import append_motion_columns
 
 # Only the suturing task is supported.  JIGSAWS directory names use
 # lowercase (``suturing/``) while filenames use CamelCase (``Suturing_B001``);
@@ -138,7 +139,9 @@ class JIGSAWSDataset(Dataset):
     itr:
         Cross-validation iteration number (default ``1``).
     expert_only:
-        If *True*, keep only trials whose metafile skill level is *Expert*.
+        If *True*, keep only trials whose **self-reported** skill in the meta
+        file (column 2, 1-based; see ``jigsaws_metafile_layout``) is *Expert*
+        (``E``), not the GRS column.
     modality:
         ``"video"``, ``"kinematics"``, or ``"both"`` (default ``"both"``).
     image_size:
@@ -149,6 +152,16 @@ class JIGSAWSDataset(Dataset):
         Sample every *N*-th frame instead of every frame (default ``1``).
         Set to e.g. ``30`` to sample ~1 frame/second at 30 fps, which
         dramatically reduces dataset size for faster iteration on CPU.
+    append_motion_features:
+        If *True*, append per-frame velocity / smoothed velocity /
+        acceleration / jerk (four scalars) after each raw 76-dim row — see
+        :mod:`~suturing_pipeline.kinematics.motion_columns`.
+    temporal_pairs:
+        If *True*, each sample is two frames ``(t, t+temporal_pair_gap)`` from
+        the same trial for temporal-consistency training (see ``train_sd.py``).
+    temporal_pair_gap:
+        Index gap between the two frames in a pair (default ``1`` =
+        consecutive frames).
     """
 
     def __init__(
@@ -164,6 +177,9 @@ class JIGSAWSDataset(Dataset):
         image_size: int = 256,
         capture: int = 1,
         frame_stride: int = 1,
+        append_motion_features: bool = False,
+        temporal_pairs: bool = False,
+        temporal_pair_gap: int = 1,
     ) -> None:
         super().__init__()
         self.data_root = Path(data_root)
@@ -172,6 +188,9 @@ class JIGSAWSDataset(Dataset):
         self.modality = modality
         self.image_size = image_size
         self.capture = capture
+        self.append_motion_features = append_motion_features
+        self.temporal_pairs = bool(temporal_pairs)
+        self.temporal_pair_gap = max(1, int(temporal_pair_gap))
 
         prefix = _TASK_FILENAME_PREFIX
 
@@ -211,7 +230,10 @@ class JIGSAWSDataset(Dataset):
         task_dir = _resolve_ci(self.data_root / _TASK_NAME)
 
         # JIGSAWS metafiles are named "meta_file_{TaskName}.txt", not
-        # "metafile.txt".  Search for the actual file.
+        # "metafile.txt".  Search for the actual file.  Column layout (1-based:
+        # filename, self N/I/E, GRS, six GRS sub-scores) is documented in
+        # ``suturing_pipeline.data.jigsaws_metafile_layout``; *expert_only* uses
+        # column 2 (self-reported), not the GRS column.
         metafile = _resolve_ci(task_dir / f"meta_file_{prefix}.txt")
         if not metafile.exists():
             metafile = _resolve_ci(task_dir / "metafile.txt")
@@ -263,6 +285,8 @@ class JIGSAWSDataset(Dataset):
                 continue
 
             kin = parse_kinematics(kin_path)
+            if self.append_motion_features:
+                kin = append_motion_columns(kin)
 
             if trans_path.exists():
                 transcription = parse_transcription(trans_path)
@@ -288,9 +312,23 @@ class JIGSAWSDataset(Dataset):
         # --- flat index -------------------------------------------------------
         stride = max(1, frame_stride)
         self._index: List[Tuple[int, int]] = []
-        for trial_idx, fc in enumerate(self._frame_counts):
-            for frame_idx in range(0, fc, stride):
-                self._index.append((trial_idx, frame_idx))
+        gap = self.temporal_pair_gap
+        if self.temporal_pairs:
+            for trial_idx, fc in enumerate(self._frame_counts):
+                last_start = fc - gap - 1
+                if last_start < 0:
+                    continue
+                for start in range(0, last_start + 1, stride):
+                    self._index.append((trial_idx, start))
+            if not self._index:
+                raise RuntimeError(
+                    "No temporal pairs in dataset: trials may be shorter than "
+                    f"temporal_pair_gap={gap}, or frame_stride is too large."
+                )
+        else:
+            for trial_idx, fc in enumerate(self._frame_counts):
+                for frame_idx in range(0, fc, stride):
+                    self._index.append((trial_idx, frame_idx))
 
         # --- kinematics scaler ------------------------------------------------
         self.scaler = StandardScaler()
@@ -313,12 +351,9 @@ class JIGSAWSDataset(Dataset):
         return len(self._index)
 
     # ------------------------------------------------------------------
-    def __getitem__(
-        self, idx: int
+    def _frame_kin_gesture(
+        self, trial_idx: int, frame_idx: int
     ) -> Tuple[torch.Tensor, torch.Tensor, int]:
-        trial_idx, frame_idx = self._index[idx]
-
-        # --- video frame (lazy seek) -----------------------------------------
         frame_tensor = torch.zeros(3, self.image_size, self.image_size)
         if self.modality in ("video", "both"):
             cap = cv2.VideoCapture(str(self._video_paths[trial_idx]))
@@ -332,15 +367,28 @@ class JIGSAWSDataset(Dataset):
                     torch.from_numpy(rgb).permute(2, 0, 1).float() / 127.5 - 1.0
                 )
 
-        # --- kinematics -------------------------------------------------------
         kin_row = self._kinematics[trial_idx][frame_idx]
         kin_scaled = self.scaler.transform(kin_row.reshape(1, -1)).flatten()
         kin_tensor = torch.from_numpy(kin_scaled).float()
 
-        # --- gesture label ----------------------------------------------------
         label_str = self._frame_labels[trial_idx].get(
             frame_idx, next(iter(self.gesture_to_int), "G0")
         )
         gesture_int = self.gesture_to_int.get(label_str, 0)
-
         return frame_tensor, kin_tensor, gesture_int
+
+    # ------------------------------------------------------------------
+    def __getitem__(
+        self, idx: int
+    ) -> Tuple[torch.Tensor, torch.Tensor, Union[int, torch.Tensor]]:
+        trial_idx, frame_idx = self._index[idx]
+
+        if self.temporal_pairs:
+            second = frame_idx + self.temporal_pair_gap
+            f0, k0, g0 = self._frame_kin_gesture(trial_idx, frame_idx)
+            f1, k1, g1 = self._frame_kin_gesture(trial_idx, second)
+            gestures = torch.tensor([g0, g1], dtype=torch.long)
+            return torch.stack([f0, f1], dim=0), torch.stack([k0, k1], dim=0), gestures
+
+        f, k, g = self._frame_kin_gesture(trial_idx, frame_idx)
+        return f, k, g

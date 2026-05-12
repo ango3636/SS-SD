@@ -53,8 +53,9 @@ sequence:
   batch_size: 4
 
 kinematics:
-  translational_velocity_cols: [13, 14, 15]
-  rotational_velocity_cols: [16, 17, 18]
+  # 0-based indices; master-left translational / rotational velocity (JIGSAWS 1-based 13–15 / 16–18)
+  translational_velocity_cols: [12, 13, 14]
+  rotational_velocity_cols: [15, 16, 17]
   savgol_window: 11
   savgol_polyorder: 3
   sampling_hz: 30.0

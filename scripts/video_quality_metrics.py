@@ -458,3 +458,54 @@ def _build_explanation(
         f"{move_note}  \n"
         f"{instab_note}"
     )
+
+
+def metrics_board_to_jsonable(board: MetricsBoard) -> dict:
+    """Serialize scalar metrics + instability list for JSON export."""
+    from dataclasses import asdict
+
+    return {
+        "fps": board.fps,
+        "n_frames": board.n_frames,
+        "similarity_score": board.similarity_score,
+        "stability_score": board.stability_score,
+        "movement_score": board.movement_score,
+        "overall_score": board.overall_score,
+        "mean_ssim": board.mean_ssim,
+        "mean_gen_delta": board.mean_gen_delta,
+        "mean_real_delta": board.mean_real_delta,
+        "motion_correlation": board.motion_correlation,
+        "instabilities": [asdict(i) for i in board.instabilities],
+        "explanation": board.explanation,
+    }
+
+
+if __name__ == "__main__":
+    import argparse
+    import json
+    import sys
+
+    _ap = argparse.ArgumentParser(description="Clip-pair metrics (SSIM, flow).")
+    _ap.add_argument("--real", type=Path, required=True)
+    _ap.add_argument("--gen", type=Path, required=True)
+    _ap.add_argument(
+        "--out_json",
+        type=Path,
+        default=None,
+        help="Optional path to write metrics JSON.",
+    )
+    _cli = _ap.parse_args()
+    _board = compute_metrics_board(_cli.real, _cli.gen)
+    if _board is None:
+        print(
+            "Could not compute metrics (missing videos or too few frames).",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    _payload = metrics_board_to_jsonable(_board)
+    if _cli.out_json is not None:
+        _cli.out_json.parent.mkdir(parents=True, exist_ok=True)
+        _cli.out_json.write_text(json.dumps(_payload, indent=2), encoding="utf-8")
+        print(f"Wrote {_cli.out_json}")
+    else:
+        print(json.dumps(_payload, indent=2))

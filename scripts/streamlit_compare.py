@@ -13,6 +13,7 @@ MP4s back into the page.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -24,11 +25,76 @@ import cv2
 import streamlit as st
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-# Make sibling modules importable when launched via `streamlit run`.
+# ``suturing_pipeline`` (src) and script-local helpers when launched via `streamlit run`.
+_SRC = REPO_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from suturing_pipeline.audio.narration_templates import GESTURE_DESCRIPTIONS  # noqa: E402
+from suturing_pipeline.data.data_utils import parse_metafile  # noqa: E402
+
 from video_quality_metrics import compute_metrics_board  # noqa: E402
+
+# JIGSAWS gesture codes where the canonical description names a hand or side.
+_GESTURE_SIDE_PREFIX: Dict[str, str] = {
+    "G1": "Right",
+    "G4": "Both",
+    "G6": "Left",
+    "G7": "Right",
+    "G9": "Right",
+    "G12": "Left",
+    "G13": "Left",
+    "G14": "Right",
+    "G15": "Right",
+}
+
+
+def _render_narration_downloads(run_dir: Path, key_prefix: str) -> None:
+    """Show download buttons for narration transcript / segment JSON when present."""
+    run_slug = run_dir.name
+    artifacts: List[Tuple[Path, str, str, str]] = []
+    tr = run_dir / "narration_transcript.txt"
+    if tr.exists():
+        artifacts.append(
+            (
+                tr,
+                f"{run_slug}_narration_transcript.txt",
+                "text/plain",
+                "Narration transcript (timed)",
+            )
+        )
+    sj = run_dir / "narration_segments.json"
+    if sj.exists():
+        artifacts.append(
+            (
+                sj,
+                f"{run_slug}_narration_segments.json",
+                "application/json",
+                "Narration segments + kinematics (JSON)",
+            )
+        )
+    for p in sorted(run_dir.glob("*_shared_narration_segments.json")):
+        artifacts.append(
+            (p, p.name, "application/json", f"Shared narration segments ({p.name})")
+        )
+    for p in sorted(run_dir.glob("*_shared_narration_transcript.txt")):
+        artifacts.append(
+            (p, p.name, "text/plain", f"Shared narration transcript ({p.name})")
+        )
+    if not artifacts:
+        return
+    with st.expander("Download narration exports", expanded=False):
+        for i, (path, fname, mime, label) in enumerate(artifacts):
+            st.download_button(
+                label,
+                data=path.read_bytes(),
+                file_name=fname,
+                mime=mime,
+                key=f"{key_prefix}_narr_{path.name}_{i}",
+            )
+
 
 def _resolve_ci(base: Path, *parts: str) -> Path:
     """Join ``parts`` under ``base`` resolving each segment case-insensitively.
@@ -64,6 +130,8 @@ def _resolve_ci(base: Path, *parts: str) -> Path:
 
 DATA_ROOT = REPO_ROOT / "data" / "gdrive_cache"
 VIDEO_DIR = _resolve_ci(DATA_ROOT, "suturing", "video")
+# JIGSAWS meta: col1 trial, col2 self N/I/E, col3 GRS, cols4–9 GRS sub-scores
+# (suturing_pipeline.data.jigsaws_metafile_layout). UI skill badge uses col 2.
 META_FILE = _resolve_ci(DATA_ROOT, "suturing", "meta_file_Suturing.txt")
 EXP_SETUP_ROOT = _resolve_ci(
     DATA_ROOT,
@@ -118,13 +186,16 @@ def scan_trials() -> List[Dict[str, object]]:
 
 
 def _load_skill_map() -> Dict[str, str]:
+    """Map ``Suturing_*`` trial → single-letter N/I/E from meta file **column 2**."""
     if not META_FILE.exists():
         return {}
+    label_to_letter = {"Novice": "N", "Intermediate": "I", "Expert": "E"}
+    full = parse_metafile(META_FILE)
     out: Dict[str, str] = {}
-    for line in META_FILE.read_text().splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[0].startswith("Suturing_"):
-            out[parts[0]] = parts[1].strip().upper()[:1]
+    for name, label in full.items():
+        if not str(name).startswith("Suturing_"):
+            continue
+        out[str(name)] = label_to_letter.get(label, (label or "?")[:1].upper())
     return out
 
 
@@ -464,6 +535,7 @@ def run_generation(
     image_size: int,
     anchor_mode: str,
     init_strength: float,
+    anchor_reset_every: int,
     held_out: Optional[int],
     run_name: str,
     log_container,
@@ -476,6 +548,14 @@ def run_generation(
     tts_voice: str,
     narrate_sidebyside: bool,
     narration_default_outputs: bool,
+    narration_backend: str = "template",
+    ollama_base_url: str = "http://127.0.0.1:11434",
+    ollama_model: str = "llama3.2",
+    hf_narration_model: str = "meta-llama/Llama-3.2-1B-Instruct",
+    hf_token: str = "",
+    foley_dir: str = "",
+    foley_gain_db: float = -12.0,
+    foley_align: str = "start",
 ) -> Tuple[int, Path]:
     """Invoke ``scripts/generate_eval_video.py`` and stream its stdout into
     the given streamlit container, updating ``progress_bar`` / ``eta_text``
@@ -483,6 +563,7 @@ def run_generation(
     """
     out_dir = OUTPUT_ROOT / run_name
     out_dir.mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
 
     cmd = [
         sys.executable,
@@ -503,6 +584,8 @@ def run_generation(
         "--anchor_mode", anchor_mode,
         "--init_strength", f"{init_strength:g}",
     ]
+    if int(anchor_reset_every) > 0:
+        cmd.extend(["--anchor_reset_every", str(int(anchor_reset_every))])
     if held_out is not None:
         cmd.extend(["--held_out", str(held_out)])
     if enable_narration:
@@ -519,6 +602,35 @@ def run_generation(
             cmd.append("--narrate_sidebyside")
         if narration_default_outputs:
             cmd.append("--narration_default_outputs")
+        nb = (narration_backend or "template").strip().lower()
+        if nb != "template":
+            cmd.extend(["--narration_backend", nb])
+            if nb == "ollama":
+                cmd.extend(
+                    [
+                        "--ollama_base_url",
+                        ollama_base_url,
+                        "--ollama_model",
+                        ollama_model,
+                    ]
+                )
+            if nb in ("huggingface", "hf"):
+                cmd.extend(["--hf_narration_model", hf_narration_model])
+                tok = (hf_token or "").strip()
+                if tok:
+                    env["HF_TOKEN"] = tok
+        fd = (foley_dir or "").strip()
+        if fd:
+            cmd.extend(
+                [
+                    "--foley_dir",
+                    fd,
+                    "--foley_gain_db",
+                    str(float(foley_gain_db)),
+                    "--foley_align",
+                    str(foley_align) if foley_align in ("start", "center") else "start",
+                ]
+            )
 
     log_container.code(" ".join(cmd), language="bash")
     live = log_container.empty()
@@ -530,6 +642,7 @@ def run_generation(
     proc = subprocess.Popen(
         cmd,
         cwd=str(REPO_ROOT),
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -584,9 +697,11 @@ def run_generation(
 
 def render_video(path: Path, caption: str, keep_audio: bool = False) -> None:
     if not path.exists() or path.stat().st_size < 1024:
-        st.warning(f"{caption}: not produced (`{path.name}` missing or tiny).")
+        miss = caption or path.name
+        st.warning(f"{miss}: not produced (`{path.name}` missing or tiny).")
         return
-    st.caption(caption)
+    if caption:
+        st.caption(caption)
     h264_path, err = transcode_generated_to_h264(
         str(path),
         path.stat().st_mtime_ns,
@@ -608,6 +723,109 @@ def render_video(path: Path, caption: str, keep_audio: bool = False) -> None:
             )
         return
     st.video(h264_path)
+
+
+def _invert_gesture_to_int(gesture_to_int: object) -> Dict[int, str]:
+    if not isinstance(gesture_to_int, dict):
+        return {}
+    out: Dict[int, str] = {}
+    for k, v in gesture_to_int.items():
+        try:
+            out[int(v)] = str(k)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _normalize_frame_gesture(
+    fr: Dict[str, object], int_to_gesture: Dict[int, str]
+) -> str:
+    g = fr.get("gesture")
+    if g is not None and str(g).strip():
+        return str(g).strip()
+    gi = fr.get("gesture_int")
+    if gi is not None:
+        try:
+            ig = int(gi)
+            if ig in int_to_gesture:
+                return int_to_gesture[ig]
+        except (TypeError, ValueError):
+            pass
+    return "G?"
+
+
+def _format_gesture_transcription_line(gesture_code: str) -> str:
+    desc = GESTURE_DESCRIPTIONS.get(gesture_code, "")
+    if not desc:
+        desc = "Unknown gesture label in this run."
+    side = _GESTURE_SIDE_PREFIX.get(gesture_code, "")
+    if side == "Both":
+        return f"Both **{gesture_code}:** {desc}"
+    if side:
+        return f"{side} **{gesture_code}:** {desc}"
+    return f"**{gesture_code}:** {desc}"
+
+
+def _collapse_gesture_segments(
+    frames: List[Dict[str, object]],
+    int_to_gesture: Dict[int, str],
+    fps: float,
+) -> List[Tuple[float, float, str]]:
+    if fps <= 0 or not frames:
+        return []
+    ordered = sorted(frames, key=lambda f: int(f.get("output_index", 0)))
+    out: List[Tuple[float, float, str]] = []
+    run_start_idx = int(ordered[0].get("output_index", 0))
+    run_g = _normalize_frame_gesture(ordered[0], int_to_gesture)
+    prev_idx = run_start_idx
+    for fr in ordered[1:]:
+        idx = int(fr.get("output_index", 0))
+        g = _normalize_frame_gesture(fr, int_to_gesture)
+        if g != run_g or idx != prev_idx + 1:
+            out.append((run_start_idx / fps, (prev_idx + 1) / fps, run_g))
+            run_start_idx = idx
+            run_g = g
+        prev_idx = idx
+    out.append((run_start_idx / fps, (prev_idx + 1) / fps, run_g))
+    return out
+
+
+def render_gesture_transcription_timeline(
+    meta: Optional[Dict[str, object]], fps_fallback: float
+) -> None:
+    """Show time-aligned gesture labels from ``metadata.json`` ``frames``."""
+    if not isinstance(meta, dict):
+        return
+    frames_obj = meta.get("frames")
+    if not isinstance(frames_obj, list) or not frames_obj:
+        return
+    frames = [f for f in frames_obj if isinstance(f, dict)]
+    if not frames:
+        return
+    int_to_gesture = _invert_gesture_to_int(meta.get("gesture_to_int"))
+    fps = fps_fallback
+    args_obj = meta.get("args")
+    if isinstance(args_obj, dict):
+        try:
+            fps = float(args_obj.get("fps_out", fps_fallback))
+        except (TypeError, ValueError):
+            fps = fps_fallback
+    if fps <= 0:
+        fps = fps_fallback
+    segments = _collapse_gesture_segments(frames, int_to_gesture, fps)
+    if not segments:
+        return
+    st.markdown("**Gesture transcription**")
+    st.caption(
+        "Expert transcription segments mapped onto this clip. "
+        "Left / Right / Both follow the standard gesture wording when it "
+        "names a hand or needle path; otherwise only the gesture code is prefixed."
+    )
+    lines = []
+    for t0, t1, g in segments:
+        line = _format_gesture_transcription_line(g)
+        lines.append(f"- `{_fmt_mmss(t0)}`–`{_fmt_mmss(t1)}` — {line}")
+    st.markdown("\n".join(lines))
 
 
 @st.cache_data(show_spinner=False, ttl=15)
@@ -705,19 +923,30 @@ def render_previous_run(run_info: Dict[str, object], fps_hint: float) -> None:
 
     sub_a, sub_b = st.columns(2)
     with sub_a:
-        render_video(real_path, "Real (resampled)")
+        st.markdown("**Raw**")
+        render_video(real_path, "")
     with sub_b:
+        st.markdown("**Generated**")
         render_video(
             selected_gen,
-            "Generated + narration" if gen_has_audio else "Generated",
+            "",
             keep_audio=gen_has_audio,
         )
 
-    if real_path.exists() and gen_path.exists():
-        try:
-            render_metrics_board(real_path, gen_path, fps_hint=float(fps_hint))
-        except Exception as e:  # pragma: no cover - defensive UI path
-            st.info(f"Metrics board unavailable: {e}")
+    render_gesture_transcription_timeline(
+        meta if isinstance(meta, dict) else None,
+        float(fps_hint),
+    )
+
+    try:
+        render_evaluation_metrics_tabs(
+            real_path,
+            gen_path,
+            fps_hint=float(fps_hint),
+            meta=meta if isinstance(meta, dict) else None,
+        )
+    except Exception as e:  # pragma: no cover - defensive UI path
+        st.info(f"Evaluation metrics unavailable: {e}")
 
     if meta:
         with st.expander("Run metadata", expanded=False):
@@ -732,6 +961,8 @@ def render_previous_run(run_info: Dict[str, object], fps_hint: float) -> None:
                 mime="video/mp4",
                 key=f"dl_side_prev_{run_info['name']}",
             )
+
+    _render_narration_downloads(run_dir, key_prefix=f"prev_{run_info['name']}")
 
 
 @st.cache_data(show_spinner=False)
@@ -782,13 +1013,47 @@ def _fmt_mmss(seconds: float) -> str:
     return f"{s // 60:d}:{s % 60:02d}"
 
 
-def render_metrics_board(
+def _nested_dict_get(root: object, *keys: str) -> object:
+    cur: object = root
+    for k in keys:
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(k)
+    return cur
+
+
+def _format_eval_scalar(value: object) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return "Yes" if value else "No"
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and not value == value:  # NaN
+            return "—"
+        v = float(value)
+        if abs(v - round(v)) < 1e-6:
+            return str(int(round(v)))
+        return f"{v:.3g}".rstrip("0").rstrip(".")
+    return str(value)[:48]
+
+
+def _intify(x: object, default: int = 0) -> int:
+    try:
+        return int(x)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _render_video_generation_metrics(
     real_path: Path, gen_path: Path, fps_hint: float
 ) -> None:
-    """Show a user-friendly metrics board comparing the two MP4s."""
+    """Pixel- and motion-based scores comparing real vs generated video."""
     import pandas as pd  # local import so we only pay it after generation
 
     if not (real_path.exists() and gen_path.exists()):
+        st.info(
+            "Real and generated MP4s are both required for video metrics."
+        )
         return
 
     with st.spinner("Scoring the generated clip..."):
@@ -806,12 +1071,10 @@ def render_metrics_board(
 
     if data is None:
         st.info(
-            "Metrics board unavailable (couldn't read the rendered clips)."
+            "Video metrics unavailable (couldn't read the rendered clips)."
         )
         return
 
-    st.divider()
-    st.subheader("Metrics board: how good is this generation?")
     st.caption(
         "Plain-language scores for this clip.  All three sub-scores are on "
         "the same 0-100 scale; higher is better."
@@ -946,6 +1209,202 @@ def render_metrics_board(
     )
 
 
+def _render_narration_generation_tab(meta: Optional[dict]) -> None:
+    """TTS pipeline summary plus optional speech-evaluation scores from metadata."""
+    if not meta or not isinstance(meta, dict):
+        st.caption("No run metadata loaded.")
+        speech_wer = _nested_dict_get(meta, "eval", "speech", "wer")
+        speech_acc = _nested_dict_get(meta, "eval", "speech", "accuracy")
+        speech_sum = _nested_dict_get(meta, "eval", "speech", "summary_quality")
+        st.markdown("**Speech evaluation**")
+        s1, s2, s3 = st.columns(3)
+        s1.metric("Speech: WER", _format_eval_scalar(speech_wer))
+        s2.metric("Accuracy", _format_eval_scalar(speech_acc))
+        s3.metric("Summary quality", _format_eval_scalar(speech_sum))
+        return
+
+    narr = meta.get("narration")
+    if not isinstance(narr, dict) or not narr.get("enabled"):
+        st.info("Narration was not enabled for this run.")
+    else:
+        st.caption(
+            "Pipeline summary from `metadata.json` (TTS and text backend)."
+        )
+        err = narr.get("error")
+        if err:
+            st.warning(f"Narration pipeline reported an error: {err}")
+
+        tts: Dict = narr.get("tts") if isinstance(narr.get("tts"), dict) else {}
+        segs = tts.get("segments")
+        if segs is None:
+            segs = narr.get("segment_count")
+        seg_display = str(_intify(segs)) if segs is not None else "—"
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric(
+            "Narration segments",
+            seg_display,
+            help="Gesture-aligned speech segments in the mixed track.",
+        )
+        dur = tts.get("duration_seconds")
+        k2.metric(
+            "Audio duration",
+            f"{float(dur):.1f} s" if dur is not None else "—",
+            help="Length of the rendered narration audio after trim/normalise.",
+        )
+        sr = tts.get("sample_rate")
+        k3.metric(
+            "Sample rate",
+            f"{_intify(sr)} Hz" if sr is not None else "—",
+            help="Output sample rate for the narration file.",
+        )
+        voice = tts.get("voice") or narr.get("tts_voice") or ""
+        k4.metric(
+            "Voice preset",
+            (str(voice)[:28] + "…")
+            if len(str(voice)) > 30
+            else str(voice or "—"),
+            help="Bark voice preset.",
+        )
+
+        k7, k8 = st.columns(2)
+        k7.metric(
+            "Text backend",
+            str(narr.get("narration_backend") or "template"),
+            help=(
+                "template / ollama / huggingface — how spoken lines were "
+                "produced."
+            ),
+        )
+        prov = tts.get("provider") or narr.get("tts_provider") or "bark"
+        k8.metric("TTS provider", str(prov))
+
+        resolved = (
+            meta.get("resolved") if isinstance(meta.get("resolved"), dict) else {}
+        )
+        vid_s = resolved.get("effective_playback_seconds")
+        aud_s = tts.get("duration_seconds")
+        if vid_s is not None and aud_s is not None:
+            gap = float(aud_s) - float(vid_s)
+            with st.expander("Audio vs video length", expanded=False):
+                st.write(
+                    f"Video segment (effective): **{float(vid_s):.2f} s** · "
+                    f"Narration audio: **{float(aud_s):.2f} s** · "
+                    f"Difference: **{gap:+.2f} s** "
+                    f"(mux uses `-shortest` when combining)."
+                )
+
+    st.markdown("**Speech evaluation**")
+    st.caption(
+        "WER is filled automatically when you generate with narration (Whisper-tiny "
+        "ASR vs intended script), unless you pass `--skip_speech_eval`. "
+        "Accuracy and summary quality are still optional human rubrics — "
+        "see `docs/speech_eval_rubric.md`."
+    )
+    speech_wer = _nested_dict_get(meta, "eval", "speech", "wer")
+    speech_acc = _nested_dict_get(meta, "eval", "speech", "accuracy")
+    speech_sum = _nested_dict_get(meta, "eval", "speech", "summary_quality")
+    speech_err = _nested_dict_get(meta, "eval", "speech", "eval_error")
+    if speech_err:
+        st.warning(f"Automatic speech metrics failed: {speech_err}")
+    s1, s2, s3 = st.columns(3)
+    s1.metric(
+        "Speech: WER",
+        _format_eval_scalar(speech_wer),
+        help="Word error rate vs reference transcript (lower is better).",
+    )
+    s2.metric(
+        "Accuracy",
+        _format_eval_scalar(speech_acc),
+        help="Task-dependent accuracy (e.g. gesture or fact correctness).",
+    )
+    s3.metric(
+        "Summary quality",
+        _format_eval_scalar(speech_sum),
+        help="Rubric or model-based score for narration summary quality.",
+    )
+
+
+def _render_sound_effects_tab(meta: Optional[dict]) -> None:
+    """Foley / ambience flags from the run plus optional music-sound rubrics."""
+    tts: Dict = {}
+    narr: Dict = {}
+    narr_on = False
+    if meta and isinstance(meta, dict):
+        narr_obj = meta.get("narration")
+        if isinstance(narr_obj, dict):
+            narr = narr_obj
+            if narr.get("enabled"):
+                narr_on = True
+                tts = narr.get("tts") if isinstance(narr.get("tts"), dict) else {}
+
+    st.markdown("**Mix (this run)**")
+    if not narr_on:
+        st.caption("Enable narration (with foley / ambience) to populate mix stats.")
+    amb_on = bool(tts.get("or_ambience") or narr.get("or_ambience"))
+    fs = tts.get("foley_segments")
+    m1, m2 = st.columns(2)
+    m1.metric(
+        "OR ambience",
+        "On" if amb_on else "Off",
+        help="Operating-room ambience layer when narration is enabled.",
+    )
+    m2.metric(
+        "Foley clips mixed",
+        str(_intify(fs)) if fs is not None else "—",
+        help="Count of gesture-keyed foley clips in the final mix.",
+    )
+
+    st.markdown("**Music / sound evaluation**")
+    st.caption(
+        "Optional fields under `eval.sound` in `metadata.json` — prompt "
+        "alignment, perceived realism, and diversity across samples."
+    )
+    pa = _nested_dict_get(meta, "eval", "sound", "prompt_alignment")
+    rl = _nested_dict_get(meta, "eval", "sound", "realism")
+    dv = _nested_dict_get(meta, "eval", "sound", "diversity")
+    u1, u2, u3 = st.columns(3)
+    u1.metric(
+        "Prompt alignment",
+        _format_eval_scalar(pa),
+        help="How well generated audio matches the intended prompt or gesture.",
+    )
+    u2.metric(
+        "Realism",
+        _format_eval_scalar(rl),
+        help="Subjective or model-based naturalness / plausibility.",
+    )
+    u3.metric(
+        "Diversity",
+        _format_eval_scalar(dv),
+        help="Variety across clips or generations (e.g. embedding spread).",
+    )
+
+
+def render_evaluation_metrics_tabs(
+    real_path: Path,
+    gen_path: Path,
+    fps_hint: float,
+    meta: Optional[dict],
+) -> None:
+    """Tabbed evaluation: video, narration, and sound-effects categories."""
+    st.divider()
+    st.subheader("Evaluation metrics")
+    tab_video, tab_narr, tab_sound = st.tabs(
+        [
+            "Video generation",
+            "Narration generation",
+            "Sound effects",
+        ]
+    )
+    with tab_video:
+        _render_video_generation_metrics(real_path, gen_path, fps_hint)
+    with tab_narr:
+        _render_narration_generation_tab(meta)
+    with tab_sound:
+        _render_sound_effects_tab(meta)
+
+
 def main() -> None:
     st.set_page_config(
         page_title="Suturing Real-vs-Generated",
@@ -1022,10 +1481,11 @@ def main() -> None:
         duration = st.slider(
             "Duration (seconds)",
             min_value=5,
-            max_value=30,
+            max_value=90,
             value=10,
             step=1,
-            help="How long the generated MP4 should play back.",
+            help="Longer clips need more frames; temporal anchors may drift — "
+            "see Advanced → reset anchor every N frames.",
         )
 
         with st.expander("Advanced settings", expanded=False):
@@ -1053,6 +1513,19 @@ def main() -> None:
                 "Init strength", 0.3, 1.0, 0.7, 0.05,
                 help="1.0 = pure noise (no anchor). Lower = stronger temporal coherence.",
             )
+            anchor_reset_every_ui = st.number_input(
+                "Reset temporal anchor every N frames (0 = never)",
+                min_value=0,
+                max_value=200,
+                value=0,
+                step=1,
+                help=(
+                    "Long clips: chaining prev_gen or flow_warp can drift or smear. "
+                    "Every N frames, skip the anchor and sample from scratch (same "
+                    "as frame 0). Try 15–30 if distortion builds over time; tradeoff "
+                    "is occasional sharper cuts."
+                ),
+            )
             enable_narration = st.checkbox(
                 "Enable narration audio",
                 value=False,
@@ -1060,14 +1533,19 @@ def main() -> None:
             )
             tts_provider = st.selectbox(
                 "Narration provider",
-                options=["gtts"],
+                options=["bark"],
                 index=0,
                 disabled=not enable_narration,
+                help="Bark (suno/bark) is the only supported backend.",
             )
             tts_voice = st.text_input(
-                "Narration language/voice",
-                value="en",
+                "Bark voice preset",
+                value="v2/en_speaker_9",
                 disabled=not enable_narration,
+                help=(
+                    "Pass any Bark voice preset string; default is 'v2/en_speaker_9'; "
+                    "sounds like a calm clinical instructor."
+                ),
             )
             narrate_sidebyside = st.checkbox(
                 "Narrate side-by-side output",
@@ -1080,6 +1558,80 @@ def main() -> None:
                 disabled=not enable_narration,
                 help="If disabled, narrated copies are written as *_narrated.mp4 instead.",
             )
+            narration_backend = st.selectbox(
+                "Narration text (before Bark)",
+                options=["template", "ollama", "huggingface"],
+                index=0,
+                disabled=not enable_narration,
+                help=(
+                    "template: kinematic sentences. ollama: free local LLM. "
+                    "huggingface: HF Inference API (HF_TOKEN env or token field below)."
+                ),
+            )
+            ollama_base_url = "http://127.0.0.1:11434"
+            ollama_model = "llama3.2"
+            hf_narration_model = "meta-llama/Llama-3.2-1B-Instruct"
+            hf_token_ui = ""
+            if enable_narration and narration_backend == "ollama":
+                ollama_base_url = st.text_input(
+                    "Ollama base URL",
+                    value=ollama_base_url,
+                    help="Default http://127.0.0.1:11434 — run `ollama serve` locally.",
+                )
+                ollama_model = st.text_input(
+                    "Ollama model",
+                    value=ollama_model,
+                    help="Example: llama3.2, mistral, qwen2.5:7b",
+                )
+            if enable_narration and narration_backend == "huggingface":
+                hf_narration_model = st.text_input(
+                    "Hugging Face model id",
+                    value=hf_narration_model,
+                )
+                hf_token_ui = st.text_input(
+                    "Hugging Face read token",
+                    type="password",
+                    value="",
+                    help=(
+                        "Optional if the process already has HF_TOKEN set. "
+                        "The token is passed via environment to the child process "
+                        "(not shown in the logged shell command)."
+                    ),
+                )
+            foley_dir_ui = st.text_input(
+                "Optional foley WAV directory",
+                value="",
+                disabled=not enable_narration,
+                help=(
+                    "Folder with G1.wav … G15.wav (one optional clip per gesture). "
+                    "Mixed under Bark per segment. Leave empty to disable."
+                ),
+            )
+            foley_gain_db_ui = st.slider(
+                "WAV foley level (dB vs segment stem)",
+                -30.0,
+                -3.0,
+                -12.0,
+                1.0,
+                disabled=not enable_narration,
+            )
+            foley_align_ui = st.selectbox(
+                "WAV foley alignment",
+                options=["start", "center"],
+                index=0,
+                disabled=not enable_narration,
+            )
+            if (
+                enable_narration
+                and narration_backend == "ollama"
+                and os.environ.get("COLAB_RELEASE_TAG")
+            ):
+                st.warning(
+                    "**Colab:** Ollama uses `127.0.0.1` on *this* notebook VM, not your "
+                    "home PC. A Cloudflare tunnel does not bridge Python HTTP to your "
+                    "laptop. Prefer **huggingface** + HF token here, or install Ollama "
+                    "inside Colab."
+                )
 
     existing_runs = scan_existing_runs()
     if existing_runs:
@@ -1271,6 +1823,7 @@ def main() -> None:
                 image_size=int(image_size),
                 anchor_mode=anchor_mode,
                 init_strength=float(init_strength),
+                anchor_reset_every=int(anchor_reset_every_ui),
                 held_out=fold_n,
                 run_name=run_name,
                 log_container=log_box,
@@ -1283,6 +1836,14 @@ def main() -> None:
                 tts_voice=str(tts_voice),
                 narrate_sidebyside=bool(narrate_sidebyside),
                 narration_default_outputs=bool(narration_default_outputs),
+                narration_backend=str(narration_backend),
+                ollama_base_url=str(ollama_base_url),
+                ollama_model=str(ollama_model),
+                hf_narration_model=str(hf_narration_model),
+                hf_token=str(hf_token_ui),
+                foley_dir=str(foley_dir_ui),
+                foley_gain_db=float(foley_gain_db_ui),
+                foley_align=str(foley_align_ui),
             )
         dt = time.time() - t0
         if rc != 0:
@@ -1331,16 +1892,27 @@ def main() -> None:
 
             sub_a, sub_b = st.columns(2)
             with sub_a:
-                render_video(real_path, "Real (resampled)")
+                st.markdown("**Raw**")
+                render_video(real_path, "")
             with sub_b:
+                st.markdown("**Generated**")
                 render_video(
                     selected_gen,
-                    "Generated + narration" if gen_has_audio else "Generated",
+                    "",
                     keep_audio=gen_has_audio,
                 )
 
-            if real_path.exists() and gen_path.exists():
-                render_metrics_board(real_path, gen_path, fps_hint=float(fps_out))
+            render_gesture_transcription_timeline(
+                meta if isinstance(meta, dict) else None,
+                float(fps_out),
+            )
+
+            render_evaluation_metrics_tabs(
+                real_path,
+                gen_path,
+                fps_hint=float(fps_out),
+                meta=meta if isinstance(meta, dict) else None,
+            )
 
             if meta:
                 with st.expander("Run metadata", expanded=False):
@@ -1352,7 +1924,10 @@ def main() -> None:
                     data=f.read(),
                     file_name=f"{run_name}_{selected_side.name}",
                     mime="video/mp4",
+                    key=f"dl_side_gen_{run_name}",
                 )
+
+            _render_narration_downloads(out_dir, key_prefix=f"gen_{run_name}")
 
 
 if __name__ == "__main__":

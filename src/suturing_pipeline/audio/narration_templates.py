@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -10,6 +10,12 @@ from suturing_pipeline.data.data_utils import (
     filter_expert_trials,
     parse_kinematics,
     parse_transcription,
+)
+from suturing_pipeline.data.jigsaws_kinematics_layout import (
+    MASTER_LEFT_TRANS_VEL,
+    MASTER_RIGHT_TRANS_VEL,
+    SLAVE_LEFT_GRIPPER,
+    SLAVE_RIGHT_GRIPPER,
 )
 
 GESTURE_DESCRIPTIONS: Dict[str, str] = {
@@ -28,6 +34,76 @@ GESTURE_DESCRIPTIONS: Dict[str, str] = {
     "G13": "Making C-loop to the left",
     "G14": "Making C-loop to the right",
     "G15": "Reaching for suture with right hand",
+}
+
+# Text prompts for AudioGen OR ambience (one clip per narration segment, keyed by gesture).
+# Wording emphasizes close-mic Foley (needle, thread, metal) plus faint room tone; no speech.
+GESTURE_AMBIENCE: Dict[str, str] = {
+    "DEFAULT": (
+        "Quiet operating theatre air, distant ventilation, very faint monitor "
+        "beeps, no voices, no music"
+    ),
+    "G1": (
+        "Laparoscopic robot gripper jaws closing on a steel needle, short metallic "
+        "clink and plastic driver housing tick, very close microphone, sterile "
+        "field, faint room hum, no speech"
+    ),
+    "G2": (
+        "Metal needle driver repositioning needle, small sliding scrape on trocar, "
+        "subtle ratchet click, close surgical Foley, low OR rumble, no speech"
+    ),
+    "G3": (
+        "Single needle puncture through soft tissue, crisp pop then brief friction, "
+        "extreme close-up surgical Foley, no voices, no suction voiceover"
+    ),
+    "G4": (
+        "Needle exchange between drivers, two muted metal taps, latex glove rub, "
+        "close instrument Foley, distant OR ventilation only, no speech"
+    ),
+    "G5": (
+        "Needle held steady in jaws, micro-vibration of thread, faint metal resonance, "
+        "tight close mic on tools, almost silent room tone, no speech"
+    ),
+    "G6": (
+        "Braided synthetic suture sliding through tissue and gloved fingers, "
+        "continuous thread zip and light tension creak, close Foley, no voices"
+    ),
+    "G7": (
+        "Right-hand traction on braided suture, ropey thread hiss through trocar, "
+        "rubber glove squeak, close surgical Foley, no speech"
+    ),
+    "G8": (
+        "Needle tip rotating against metal driver, tiny grinding scrape, "
+        "orientation motion Foley, very close mic, no voices"
+    ),
+    "G9": (
+        "Suture bundle tightening, cord rub on gloves, soft nylon rasp, "
+        "close knot-tying Foley, no voices"
+    ),
+    "G10": (
+        "More suture paid out from reel, rapid thread whisper through guides, "
+        "light plastic packaging flutter, close Foley, no speech"
+    ),
+    "G11": (
+        "Suture tail released, thread slaps tray softly, instruments settle with "
+        "dull metal clunk, end-of-task Foley, no voices"
+    ),
+    "G12": (
+        "Left instrument reach, gripper taps needle, ceramic or metal light click, "
+        "close pick-up Foley, faint OR air, no speech"
+    ),
+    "G13": (
+        "C-loop left: suture whips through air then slides on glove, airy thread swish, "
+        "close motion Foley, no voices"
+    ),
+    "G14": (
+        "C-loop right: thread swoosh and nylon rasp on driver, quick handoff motion, "
+        "close surgical Foley, no speech"
+    ),
+    "G15": (
+        "Reach for suture tail, thread pulls from field, soft zipper-like nylon slide, "
+        "close Foley, distant sterile plastic crinkle, no voices"
+    ),
 }
 
 ABSOLUTE_SPEED_THRESHOLDS_MM_S = {
@@ -68,8 +144,9 @@ def _resolve_ci(path: Path) -> Path:
 
 
 def _speed_per_row(kinematic_segment: np.ndarray) -> np.ndarray:
-    left = np.asarray(kinematic_segment[:, 0:3], dtype=np.float64)
-    right = np.asarray(kinematic_segment[:, 38:41], dtype=np.float64)
+    """Per-frame speed from master-left and master-right translational velocity."""
+    left = np.asarray(kinematic_segment[:, MASTER_LEFT_TRANS_VEL], dtype=np.float64)
+    right = np.asarray(kinematic_segment[:, MASTER_RIGHT_TRANS_VEL], dtype=np.float64)
     left_mag = np.linalg.norm(left, axis=1)
     right_mag = np.linalg.norm(right, axis=1)
     return 0.5 * (left_mag + right_mag)
@@ -123,7 +200,11 @@ def extract_kinematic_summary(
     expert_speed_stats: Optional[Dict[str, SpeedStats | Dict[str, float]]] = None,
     min_count_for_empirical: int = 8,
 ) -> Dict[str, float | str]:
-    """Summarize a gesture segment from JIGSAWS kinematics (N, 76)."""
+    """Summarize a gesture segment from JIGSAWS kinematics (N, 76).
+
+    Uses README column layout: master left/right translational velocity for
+    motion speed; slave left/right gripper angles for on-screen instruments.
+    """
     seg = np.asarray(kinematic_segment, dtype=np.float64)
     if seg.ndim != 2 or seg.shape[1] < 76:
         raise ValueError(
@@ -142,10 +223,10 @@ def extract_kinematic_summary(
             "segment_length_frames": 0,
         }
 
-    avg_velocity_left = _safe_mean(seg[:, 0:3])
-    avg_velocity_right = _safe_mean(seg[:, 38:41])
-    avg_gripper_left = _safe_mean(seg[:, 37])
-    avg_gripper_right = _safe_mean(seg[:, 75])
+    avg_velocity_left = _safe_mean(seg[:, MASTER_LEFT_TRANS_VEL])
+    avg_velocity_right = _safe_mean(seg[:, MASTER_RIGHT_TRANS_VEL])
+    avg_gripper_left = _safe_mean(seg[:, SLAVE_LEFT_GRIPPER])
+    avg_gripper_right = _safe_mean(seg[:, SLAVE_RIGHT_GRIPPER])
     speed_rows = _speed_per_row(seg)
     speed_var = float(np.nanvar(speed_rows)) if speed_rows.size else 0.0
     motion_smoothness = float(1.0 / (speed_var + _EPS))
@@ -168,6 +249,53 @@ def extract_kinematic_summary(
         "speed_rating_source": speed_source,
         "segment_length_frames": int(seg.shape[0]),
     }
+
+
+def max_narration_words_for_duration(duration_seconds: float) -> int:
+    """Upper bound on narration length for LLM / TTS timing (word count)."""
+    d = float(duration_seconds)
+    if d < 2.0:
+        return 8
+    if d < 4.0:
+        return 15
+    return 25
+
+
+def build_llm_prompt(
+    gesture_label: str,
+    gesture_description: str,
+    kinematic_summary: Dict[str, object],
+    duration_seconds: float,
+) -> str:
+    """Build a system-style instruction block for an LLM narrator.
+
+    Word budget scales with on-screen segment duration. Style targets
+    clinical dictation: crisp observations, numbers spelled out, and
+    ellipses between distinct findings.
+    """
+    max_words = max_narration_words_for_duration(duration_seconds)
+    summary_lines = "\n".join(
+        f"- {key}: {value}" for key, value in sorted(kinematic_summary.items())
+    )
+    return (
+        "You are a surgical skills narrator producing a single spoken line for "
+        "one gesture segment of a laparoscopic suturing trial.\n\n"
+        "STYLE (mandatory):\n"
+        "- Clinical dictation tone: concise, neutral, present tense, as if "
+        "dictating into a microphone in the OR.\n"
+        "- Spell out all numbers in words (e.g. \"three\" not \"3\").\n"
+        "- Separate distinct observations with an ellipsis and space "
+        "(\"... \") so the TTS inserts a short pause between clauses.\n"
+        "- Do not include stage directions, quotes, or meta commentary.\n\n"
+        f"GESTURE: {gesture_label}\n"
+        f"DESCRIPTION: {gesture_description}\n"
+        f"SEGMENT_DURATION_SECONDS: {float(duration_seconds):.3f}\n"
+        f"MAX_WORDS (including spelled-out number words): {max_words}\n\n"
+        "KINEMATIC_SUMMARY:\n"
+        f"{summary_lines}\n\n"
+        f"Respond with at most {max_words} words of narration text only, "
+        "no preamble or bullet list."
+    )
 
 
 def _smoothness_label(motion_smoothness: float) -> str:
@@ -215,6 +343,26 @@ def build_narration_payload(
         "summary": summary,
         "narration_text": render_narration_text(gesture_label, summary),
     }
+
+
+def kinematics_segment_to_jsonable(kinematic_segment: np.ndarray) -> List[List[float]]:
+    """Serialize a per-frame kinematics block for JSON (rounded floats)."""
+    a = np.asarray(kinematic_segment, dtype=np.float64)
+    return np.round(a, 6).tolist()
+
+
+def write_narration_transcript(
+    segments: Sequence[Mapping[str, object]], path: str | Path
+) -> None:
+    """Write a human-readable timed transcript using final ``narration_text``."""
+    lines: List[str] = []
+    for seg in segments:
+        st = float(seg["start_time"])
+        et = float(seg["end_time"])
+        g = seg.get("gesture", "?")
+        text = str(seg.get("narration_text", "")).strip()
+        lines.append(f"[{st:.3f}s – {et:.3f}s] {g}: {text}")
+    Path(path).write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
 
 def collapse_frame_records(
@@ -275,6 +423,8 @@ def build_expert_speed_stats(
     data_root = Path(data_root)
     task_dir = _resolve_ci(data_root / task)
     task_prefix = "Suturing" if task.lower() == "suturing" else task.capitalize()
+    # ``meta_file_*.txt``: col 1 trial, col 2 self N/I/E, col 3 GRS, cols 4–9 GRS
+    # elements (see jigsaws_metafile_layout). Expert filter = col 2 only.
     metafile = _resolve_ci(task_dir / f"meta_file_{task_prefix}.txt")
     if not metafile.exists():
         return {}
